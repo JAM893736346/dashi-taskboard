@@ -1,0 +1,7 @@
+CREATE TABLE automation_claims (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, dispatcher_id TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('claimed', 'running', 'retry_wait', 'completed', 'failed', 'canceled')), attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0), model TEXT NOT NULL, reasoning_effort TEXT NOT NULL, lease_token_hash TEXT NOT NULL, lease_expires_at TEXT NOT NULL, next_retry_at TEXT, codex_thread_id TEXT, input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0), output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0), error TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, updated_at TEXT NOT NULL);
+CREATE INDEX automation_claims_updated ON automation_claims(updated_at DESC, id);
+CREATE INDEX automation_claims_task ON automation_claims(task_id, created_at DESC, id);
+CREATE UNIQUE INDEX automation_claims_one_active_per_task ON automation_claims(task_id) WHERE status IN ('claimed', 'running', 'retry_wait');
+CREATE TRIGGER automation_claims_revision_insert AFTER INSERT ON automation_claims BEGIN UPDATE global_revision SET revision = revision + 1 WHERE singleton = 1; END;
+CREATE TRIGGER automation_claims_revision_update AFTER UPDATE ON automation_claims BEGIN UPDATE global_revision SET revision = revision + 1 WHERE singleton = 1; END;
+CREATE TRIGGER automation_claims_revision_delete AFTER DELETE ON automation_claims BEGIN UPDATE global_revision SET revision = revision + 1 WHERE singleton = 1; END;

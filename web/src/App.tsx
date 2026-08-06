@@ -12,13 +12,6 @@ import {
   type SetStateAction,
 } from "react";
 import {
-  isAutomationModel,
-  isAutomationReasoningEffort,
-  isSupportedModelEffort,
-  type AutomationModel,
-  type AutomationReasoningEffort,
-} from "../../shared/taskboard-automation-options.mjs";
-import {
   ApiError,
   addTaskRelation,
   archiveTask as archiveTaskRequest,
@@ -44,6 +37,7 @@ import {
 } from "./actors";
 import { BoardColumn, STATUS_DETAILS } from "./components/BoardColumn";
 import { AiChat } from "./components/AiChat";
+import { AutomaticProcessingMenu } from "./components/AutomaticProcessingMenu";
 import { BoardSettingsMenu } from "./components/BoardSettingsMenu";
 import { CodexHistorySyncDialog } from "./components/CodexHistorySyncDialog";
 import { HiddenColumns } from "./components/HiddenColumns";
@@ -52,7 +46,6 @@ import {
   type PendingInlineImage,
 } from "./components/InlineMediaComposer";
 import { LinearIcon } from "./components/LinearIcon";
-import { ProjectAutomationMenu } from "./components/ProjectAutomationMenu";
 import { TaskContextMenu } from "./components/TaskContextMenu";
 import { TaskDetail } from "./components/TaskDetail";
 import { TaskEditor } from "./components/TaskEditor";
@@ -130,61 +123,6 @@ interface UndoNotice {
 }
 
 type ColumnVisibilityByProject = Record<string, Partial<Record<TaskStatus, boolean>>>;
-type ProjectAutomationStatus = "ACTIVE" | "PAUSED";
-type AutomationQuotaState = "available" | "blocked" | "unknown" | "unavailable";
-type AutomationIntervalMinutes = 5 | 10 | 15 | 30 | 60;
-
-interface AutomationQuotaStatus {
-  state: AutomationQuotaState;
-  checkedAt: number;
-  resetsAt?: number;
-  reason?: "api-key";
-}
-
-interface ProjectAutomationRecord {
-  automationId?: string;
-  codexProjectId: string;
-  status: ProjectAutomationStatus;
-  enabledByUser: boolean;
-  quotaAware: boolean;
-  quota?: AutomationQuotaStatus;
-  intervalMinutes: AutomationIntervalMinutes;
-  model: AutomationModel;
-  reasoningEffort: AutomationReasoningEffort;
-}
-
-type ProjectAutomations = Record<string, ProjectAutomationRecord>;
-
-interface AutomationHostItem {
-  id: string;
-  status: ProjectAutomationStatus;
-  model: AutomationModel;
-  reasoningEffort: AutomationReasoningEffort;
-  rrule: string;
-}
-
-interface AutomationHostResponse {
-  requestId: string;
-  ok: boolean;
-  item?: AutomationHostItem;
-  items?: AutomationHostItem[];
-  quota?: AutomationQuotaStatus;
-  policy?: {
-    automationId?: string;
-    enabledByUser: boolean;
-    quotaAware: boolean;
-    intervalMinutes: AutomationIntervalMinutes;
-    model: AutomationModel;
-    reasoningEffort: AutomationReasoningEffort;
-  };
-  error?: string;
-}
-
-interface PendingAutomationRequest {
-  resolve: (response: AutomationHostResponse) => void;
-  reject: (error: Error) => void;
-  timeoutId: number;
-}
 
 const DEFAULT_USER_ACTOR: ActorIdentity = {
   type: "user",
@@ -198,14 +136,6 @@ const FAVORITE_PROJECTS_KEY = "taskboard.favoriteProjectIds";
 const DEVICE_WORKSPACE_PATHS_KEY = "taskboard.deviceWorkspacePaths.v1";
 const SHOW_EMPTY_COLUMNS_KEY = "taskboard.showEmptyColumns.v1";
 const COLUMN_VISIBILITY_KEY = "taskboard.columnVisibility.v1";
-const PROJECT_AUTOMATIONS_KEY = "taskboard.projectAutomations.v1";
-const DEFAULT_AUTOMATION_OPTIONS = {
-  enabledByUser: false,
-  quotaAware: false,
-  intervalMinutes: 5,
-  model: "gpt-5.5",
-  reasoningEffort: "high",
-} as const;
 
 const EVENT_NAMES = [
   "task.created",
@@ -260,86 +190,6 @@ function readShowEmptyColumns(): boolean {
   return window.localStorage.getItem(SHOW_EMPTY_COLUMNS_KEY) === "true";
 }
 
-function readProjectAutomations(): ProjectAutomations {
-  try {
-    const value = JSON.parse(window.localStorage.getItem(PROJECT_AUTOMATIONS_KEY) ?? "{}");
-    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-    const result: ProjectAutomations = {};
-    for (const [projectId, record] of Object.entries(value)) {
-      if (!record || typeof record !== "object" || Array.isArray(record)) continue;
-      const candidate = record as Partial<ProjectAutomationRecord>;
-      const model = candidate.model ?? "gpt-5.5";
-      const reasoningEffort = candidate.reasoningEffort ?? "high";
-      const enabledByUser = candidate.enabledByUser ?? candidate.status === "ACTIVE";
-      const quotaAware = candidate.quotaAware ?? false;
-      if (
-        (candidate.automationId !== undefined && typeof candidate.automationId !== "string")
-        || typeof candidate.codexProjectId !== "string"
-        || (candidate.status !== "ACTIVE" && candidate.status !== "PAUSED")
-        || !isAutomationIntervalMinutes(candidate.intervalMinutes ?? 5)
-        || !isAutomationModel(model)
-        || !isAutomationReasoningEffort(reasoningEffort)
-        || !isSupportedModelEffort(model, reasoningEffort)
-        || (candidate.status === "ACTIVE" && !candidate.automationId)
-        || typeof enabledByUser !== "boolean"
-        || typeof quotaAware !== "boolean"
-      ) continue;
-      const quota = isAutomationQuotaStatus(candidate.quota) ? candidate.quota : undefined;
-      result[projectId] = {
-        automationId: candidate.automationId,
-        codexProjectId: candidate.codexProjectId,
-        status: candidate.status,
-        enabledByUser,
-        quotaAware,
-        ...(quota ? { quota } : {}),
-        intervalMinutes: candidate.intervalMinutes ?? 5,
-        model,
-        reasoningEffort,
-      };
-    }
-    return result;
-  } catch {
-    return {};
-  }
-}
-
-function isAutomationQuotaStatus(value: unknown): value is AutomationQuotaStatus {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const candidate = value as Partial<AutomationQuotaStatus>;
-  return (
-    (candidate.state === "available"
-      || candidate.state === "blocked"
-      || candidate.state === "unknown"
-      || candidate.state === "unavailable")
-    && Number.isFinite(candidate.checkedAt)
-    && (candidate.resetsAt === undefined || Number.isFinite(candidate.resetsAt))
-    && (candidate.reason === undefined || candidate.reason === "api-key")
-  );
-}
-
-function isAutomationHostPolicy(
-  value: AutomationHostResponse["policy"] | undefined,
-): value is NonNullable<AutomationHostResponse["policy"]> {
-  return Boolean(
-    value
-    && (value.automationId === undefined || typeof value.automationId === "string")
-    && typeof value.enabledByUser === "boolean"
-    && typeof value.quotaAware === "boolean"
-    && isAutomationIntervalMinutes(value.intervalMinutes)
-    && isAutomationModel(value.model)
-    && isAutomationReasoningEffort(value.reasoningEffort)
-    && isSupportedModelEffort(value.model, value.reasoningEffort),
-  );
-}
-
-function isAutomationIntervalMinutes(value: unknown): value is AutomationIntervalMinutes {
-  return value === 5 || value === 10 || value === 15 || value === 30 || value === 60;
-}
-
-function intervalMinutesFromRrule(value: string): AutomationIntervalMinutes | null {
-  const match = /^RRULE:FREQ=MINUTELY;INTERVAL=(5|10|15|30|60)$/.exec(value);
-  return match ? Number(match[1]) as AutomationIntervalMinutes : null;
-}
 
 function readColumnVisibilityByProject(): ColumnVisibilityByProject {
   try {
@@ -371,30 +221,6 @@ function errorMessage(error: unknown): string {
   if (error instanceof ApiError) return error.message;
   if (error instanceof Error) return error.message;
   return "Something went wrong while loading your issues.";
-}
-
-function isAutomationHostItem(value: unknown): value is AutomationHostItem {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const item = value as Partial<AutomationHostItem>;
-  return (
-    typeof item.id === "string"
-    && (item.status === "ACTIVE" || item.status === "PAUSED")
-    && isAutomationModel(item.model)
-    && isAutomationReasoningEffort(item.reasoningEffort)
-    && isSupportedModelEffort(item.model, item.reasoningEffort)
-    && typeof item.rrule === "string"
-    && intervalMinutesFromRrule(item.rrule) !== null
-  );
-}
-
-function isLocalTaskboardOrigin(origin: string): boolean {
-  try {
-    const { protocol, hostname } = new URL(origin);
-    return (protocol === "http:" || protocol === "https:")
-      && (hostname === "127.0.0.1" || hostname === "localhost");
-  } catch {
-    return false;
-  }
 }
 
 function sortTasks(tasks: Task[]): Task[] {
@@ -575,9 +401,6 @@ export function App() {
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [favoriteProjectIds, setFavoriteProjectIds] = useState(readFavoriteProjectIds);
   const [deviceWorkspacePaths, setDeviceWorkspacePaths] = useState(readDeviceWorkspacePaths);
-  const [projectAutomations, setProjectAutomations] = useState(readProjectAutomations);
-  const [automationPending, setAutomationPending] = useState(false);
-  const [automationError, setAutomationError] = useState<string | null>(null);
   const [announcement, setAnnouncementValue] = useState("");
   const [undoNotice, setUndoNotice] = useState<UndoNotice | null>(null);
   const tasksRequestRef = useRef(0);
@@ -590,9 +413,6 @@ export function App() {
   selectedProjectIdRef.current = selectedProjectId;
 
   const revisionPollingInterval = getRevisionPollingInterval(taskboardMetadata);
-  const pendingAutomationRequestsRef = useRef(new Map<string, PendingAutomationRequest>());
-  const automationRequestInFlightRef = useRef(false);
-  const projectAutomationsRef = useRef(projectAutomations);
 
   const setAnnouncement = useCallback((message: string) => {
     setUndoNotice(null);
@@ -616,46 +436,20 @@ export function App() {
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
   const currentUser = hostContext?.user ?? DEFAULT_USER_ACTOR;
   const selectedDeviceWorkspacePath = deviceWorkspacePaths[selectedProjectId];
-  const selectedProjectAutomation = projectAutomations[selectedProjectId];
-  const automationProjectContext = useMemo(() => {
-    if (!embedded || window.parent === window) {
-      return { unavailableReason: "仅可在 Codex App 中使用" };
+  const automaticProcessingWorkspacePaths = useMemo(() => {
+    const next = { ...deviceWorkspacePaths };
+    if (hostContext?.workspacePath) {
+      const taskboardProjectId = projects.some((project) => project.id === hostContext.projectId)
+        ? hostContext.projectId
+        : projects.some((project) => project.id === "local")
+          ? "local"
+          : null;
+      if (taskboardProjectId && !next[taskboardProjectId]) {
+        next[taskboardProjectId] = hostContext.workspacePath;
+      }
     }
-    if (!isLocalTaskboardOrigin(window.location.origin)) {
-      return { unavailableReason: "仅本地任务面板可用" };
-    }
-    if (!selectedProject) return { unavailableReason: "请先选择项目" };
-
-    const directCodexProject = hostContext?.projects?.some(
-      (project) => project.id === selectedProject.id,
-    );
-    const workspacePath = deviceWorkspacePaths[selectedProject.id]
-      ?? selectedProject.workspacePath
-      ?? (
-        directCodexProject && hostContext?.projectId === selectedProject.id
-          ? hostContext.workspacePath
-          : undefined
-      );
-    const codexProjectId = directCodexProject
-      ? selectedProject.id
-      : hostContext?.projects?.find(
-        (project) => deviceWorkspacePaths[project.id] === workspacePath,
-      )?.id;
-
-    if (!workspacePath || !codexProjectId) {
-      return { unavailableReason: "请先在 Codex 中添加并映射该项目目录" };
-    }
-    if (!manageTaskboardSkillPath) {
-      return { unavailableReason: "任务面板还没有读取到 Skill 路径" };
-    }
-    return { workspacePath, codexProjectId, unavailableReason: null };
-  }, [
-    deviceWorkspacePaths,
-    embedded,
-    hostContext,
-    manageTaskboardSkillPath,
-    selectedProject,
-  ]);
+    return next;
+  }, [deviceWorkspacePaths, hostContext?.projectId, hostContext?.workspacePath, projects]);
   const detailTask = detailTaskIdentifier
     ? tasks.find((task) => task.identifier === detailTaskIdentifier) ?? null
     : null;
@@ -715,212 +509,6 @@ export function App() {
     [deviceWorkspacePaths, projects],
   );
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
-
-  const writeProjectAutomation = useCallback((
-    projectId: string,
-    record: ProjectAutomationRecord | null | undefined,
-  ) => {
-    setProjectAutomations((current) => {
-      if (
-        record
-        && current[projectId]?.automationId === record.automationId
-        && current[projectId]?.codexProjectId === record.codexProjectId
-        && current[projectId]?.status === record.status
-        && current[projectId]?.enabledByUser === record.enabledByUser
-        && current[projectId]?.quotaAware === record.quotaAware
-        && JSON.stringify(current[projectId]?.quota) === JSON.stringify(record.quota)
-        && current[projectId]?.intervalMinutes === record.intervalMinutes
-        && current[projectId]?.model === record.model
-        && current[projectId]?.reasoningEffort === record.reasoningEffort
-      ) {
-        return current;
-      }
-      const next = { ...current };
-      if (record) next[projectId] = record;
-      else delete next[projectId];
-      projectAutomationsRef.current = next;
-      window.localStorage.setItem(PROJECT_AUTOMATIONS_KEY, JSON.stringify(next));
-      return next;
-    });
-  }, []);
-
-  const sendAutomationRequest = useCallback((
-    operation: "ensure-active" | "pause" | "list" | "apply-policy",
-    options: Pick<
-      ProjectAutomationRecord,
-      "enabledByUser" | "quotaAware" | "intervalMinutes" | "model" | "reasoningEffort"
-    >,
-    automationId?: string,
-  ) => {
-    if (
-      !selectedProject
-      || !automationProjectContext.codexProjectId
-      || !automationProjectContext.workspacePath
-    ) {
-      return Promise.reject(new Error(
-        automationProjectContext.unavailableReason ?? "无法读取项目自动化信息",
-      ));
-    }
-    const requestId = window.crypto.randomUUID();
-    const response = new Promise<AutomationHostResponse>((resolve, reject) => {
-      const timeoutId = window.setTimeout(() => {
-        pendingAutomationRequestsRef.current.delete(requestId);
-        reject(new Error("Codex 自动化没有响应，请稍后重试"));
-      }, 10_000);
-      pendingAutomationRequestsRef.current.set(requestId, { resolve, reject, timeoutId });
-    });
-    window.parent.postMessage({
-      type: "taskboard:automation-request",
-      payload: {
-        requestId,
-        operation,
-        taskboardProjectId: selectedProjectId,
-        codexProjectId: automationProjectContext.codexProjectId,
-        projectName: selectedProject.name,
-        workspacePath: automationProjectContext.workspacePath,
-        skillPath: manageTaskboardSkillPath,
-        ...(automationId ? { automationId } : {}),
-        enabledByUser: options.enabledByUser,
-        quotaAware: options.quotaAware,
-        intervalMinutes: options.intervalMinutes,
-        model: options.model,
-        reasoningEffort: options.reasoningEffort,
-      },
-    }, "*");
-    return response;
-  }, [
-    automationProjectContext,
-    manageTaskboardSkillPath,
-    selectedProject,
-    selectedProjectId,
-  ]);
-
-  const reconcileProjectAutomation = useCallback(async () => {
-    if (automationProjectContext.unavailableReason) {
-      setAutomationError(null);
-      return;
-    }
-    if (!selectedProjectId || !automationProjectContext.codexProjectId || automationRequestInFlightRef.current) return;
-    const stored = projectAutomationsRef.current[selectedProjectId];
-    automationRequestInFlightRef.current = true;
-    setAutomationPending(true);
-    setAutomationError(null);
-    try {
-      const options = stored ?? {
-        status: "PAUSED" as const,
-        ...DEFAULT_AUTOMATION_OPTIONS,
-      };
-      const response = await sendAutomationRequest(
-        stored ? "apply-policy" : "list",
-        options,
-        stored?.automationId,
-      );
-      const items = Array.isArray(response.items)
-        ? response.items.filter(isAutomationHostItem)
-        : [];
-      if (!stored) {
-        const policy = isAutomationHostPolicy(response.policy) ? response.policy : null;
-        if (!policy) return;
-        const item = items.find((candidate) => candidate.id === policy.automationId)
-          ?? (items.length === 1 ? items[0] : undefined);
-        writeProjectAutomation(selectedProjectId, {
-          automationId: item?.id ?? policy.automationId,
-          codexProjectId: automationProjectContext.codexProjectId,
-          status: item?.status ?? "PAUSED",
-          enabledByUser: policy.enabledByUser,
-          quotaAware: policy.quotaAware,
-          intervalMinutes: policy.intervalMinutes,
-          model: policy.model,
-          reasoningEffort: policy.reasoningEffort,
-        });
-        return;
-      }
-      const item = (isAutomationHostItem(response.item) ? response.item : undefined)
-        ?? items.find((item) => item.id === stored?.automationId)
-        ?? (items.length === 1 ? items[0] : undefined);
-      if (!item) {
-        if (stored) {
-          writeProjectAutomation(selectedProjectId, {
-            ...stored,
-            automationId: undefined,
-            status: "PAUSED",
-            ...(response.quota ? { quota: response.quota } : {}),
-          });
-        }
-        return;
-      }
-      const intervalMinutes = intervalMinutesFromRrule(item.rrule);
-      if (!intervalMinutes) return;
-      writeProjectAutomation(selectedProjectId, {
-        automationId: item.id,
-        codexProjectId: automationProjectContext.codexProjectId,
-        status: item.status,
-        enabledByUser: stored.enabledByUser,
-        quotaAware: stored.quotaAware,
-        ...(response.quota ? { quota: response.quota } : {}),
-        intervalMinutes,
-        model: item.model,
-        reasoningEffort: item.reasoningEffort,
-      });
-    } catch (error) {
-      setAutomationError(error instanceof Error ? error.message : "无法读取自动化状态");
-    } finally {
-      automationRequestInFlightRef.current = false;
-      setAutomationPending(false);
-    }
-  }, [
-    automationProjectContext,
-    selectedProjectId,
-    sendAutomationRequest,
-    writeProjectAutomation,
-  ]);
-
-  const saveProjectAutomation = useCallback(async (options: {
-    enabledByUser: boolean;
-    quotaAware: boolean;
-    intervalMinutes: AutomationIntervalMinutes;
-    model: AutomationModel;
-    reasoningEffort: AutomationReasoningEffort;
-  }) => {
-    const stored = projectAutomations[selectedProjectId];
-    if (
-      !selectedProjectId
-      || automationProjectContext.unavailableReason
-      || !automationProjectContext.codexProjectId
-      || automationRequestInFlightRef.current
-    ) return;
-    const previousRecord = stored;
-    automationRequestInFlightRef.current = true;
-    setAutomationPending(true);
-    setAutomationError(null);
-    try {
-      const response = await sendAutomationRequest("apply-policy", options, stored?.automationId);
-      const item = isAutomationHostItem(response.item) ? response.item : undefined;
-      writeProjectAutomation(selectedProjectId, {
-        automationId: item?.id,
-        codexProjectId: automationProjectContext.codexProjectId,
-        status: item?.status ?? "PAUSED",
-        enabledByUser: options.enabledByUser,
-        quotaAware: options.quotaAware,
-        ...(response.quota ? { quota: response.quota } : {}),
-        intervalMinutes: options.intervalMinutes,
-        model: options.model,
-        reasoningEffort: options.reasoningEffort,
-      });
-    } catch (error) {
-      writeProjectAutomation(selectedProjectId, previousRecord);
-      setAutomationError(error instanceof Error ? error.message : "无法更新自动化");
-    } finally {
-      automationRequestInFlightRef.current = false;
-      setAutomationPending(false);
-    }
-  }, [
-    automationProjectContext,
-    projectAutomations,
-    selectedProjectId,
-    sendAutomationRequest,
-    writeProjectAutomation,
-  ]);
 
   function openTaskDetail(task: Pick<Task, "identifier" | "projectId">) {
     closeContextMenu();
@@ -994,30 +582,11 @@ export function App() {
   }, [projectMenuOpen]);
 
   useEffect(() => {
-    setAutomationError(null);
-    void reconcileProjectAutomation();
-  }, [selectedProjectId, reconcileProjectAutomation]);
-
-  useEffect(() => {
     if (!embedded || window.parent === window) return;
 
     function receiveHostMessage(event: MessageEvent) {
       if (event.source !== window.parent || !event.data || typeof event.data !== "object") return;
       const message = event.data as { type?: string; payload?: unknown; theme?: unknown };
-
-      if (message.type === "taskboard:automation-response" && message.payload) {
-        const payload = message.payload as Partial<AutomationHostResponse>;
-        if (typeof payload.requestId !== "string") return;
-        const pending = pendingAutomationRequestsRef.current.get(payload.requestId);
-        if (!pending) return;
-        window.clearTimeout(pending.timeoutId);
-        pendingAutomationRequestsRef.current.delete(payload.requestId);
-        if (payload.ok) pending.resolve(payload as AutomationHostResponse);
-        else pending.reject(new Error(
-          typeof payload.error === "string" ? payload.error : "Codex 无法更新自动化",
-        ));
-        return;
-      }
 
       if (message.type === "taskboard:theme" && isTheme(message.theme)) {
         setTheme(message.theme);
@@ -1047,10 +616,6 @@ export function App() {
     window.parent.postMessage({ type: "taskboard:ready" }, "*");
     return () => {
       window.removeEventListener("message", receiveHostMessage);
-      for (const pending of pendingAutomationRequestsRef.current.values()) {
-        window.clearTimeout(pending.timeoutId);
-      }
-      pendingAutomationRequestsRef.current.clear();
     };
   }, [embedded]);
 
@@ -2000,16 +1565,11 @@ export function App() {
           <div ref={dragRegionRef} className="workspace-drag-region" aria-hidden="true" />
 
           <div className="header-actions">
-            {selectedProjectId && (
-              <ProjectAutomationMenu
-                automation={selectedProjectAutomation}
-                pending={automationPending}
-                error={automationError}
-                unavailableReason={automationProjectContext.unavailableReason}
-                onOpen={() => void reconcileProjectAutomation()}
-                onChange={(options) => void saveProjectAutomation(options)}
-              />
-            )}
+            <AutomaticProcessingMenu
+              projects={projects}
+              workspacePaths={automaticProcessingWorkspacePaths}
+              available={taskboardMetadata?.localCapabilities?.available !== false}
+            />
             {selectedProjectId && boardView === "issues" && (
               <button
                 className="icon-button header-create-button"
@@ -2111,15 +1671,22 @@ export function App() {
                 <h1>选择项目</h1>
                 <p>从 Codex 项目开始，或继续使用之前保存的项目。</p>
               </div>
-              <button
-                type="button"
-                className="button secondary project-history-sync"
-                disabled={projects.length === 0}
-                onClick={() => setCodexHistorySyncOpen(true)}
-              >
-                <LinearIcon name="terminal" />
-                同步 Codex 历史
-              </button>
+              <div className="project-home-actions">
+                <AutomaticProcessingMenu
+                  projects={projects}
+                  workspacePaths={automaticProcessingWorkspacePaths}
+                  available={taskboardMetadata?.localCapabilities?.available !== false}
+                />
+                <button
+                  type="button"
+                  className="button secondary project-history-sync"
+                  disabled={projects.length === 0}
+                  onClick={() => setCodexHistorySyncOpen(true)}
+                >
+                  <LinearIcon name="terminal" />
+                  同步 Codex 历史
+                </button>
+              </div>
             </div>
             {projectsLoading ? (
               <div className="project-grid project-grid-loading" aria-label="正在加载项目" aria-busy="true">

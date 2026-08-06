@@ -1,3 +1,8 @@
+import type {
+  AutomationModel,
+  AutomationReasoningEffort,
+} from "../../shared/taskboard-automation-options.mjs";
+
 export const TASK_STATUSES = [
   "backlog",
   "todo",
@@ -51,6 +56,92 @@ export interface TaskboardMetadata {
 
 export interface TaskboardCapabilities {
   localAiChat: boolean;
+}
+
+export type AutomaticProcessingProjectMode = "all" | "selected";
+export type AutomaticProcessingClaimStrategy = "board-order" | "priority-first" | "due-date-first";
+export type AutomaticProcessingState =
+  | "disabled"
+  | "idle"
+  | "running"
+  | "quota_paused"
+  | "daily_limit"
+  | "error";
+export type AutomationClaimStatus =
+  | "claimed"
+  | "running"
+  | "retry_wait"
+  | "completed"
+  | "failed"
+  | "canceled";
+
+export interface AutomaticProcessingSettings {
+  version: 1;
+  enabled: boolean;
+  projectMode: AutomaticProcessingProjectMode;
+  projectIds: string[];
+  claimStrategy: AutomaticProcessingClaimStrategy;
+  executionModel: AutomationModel;
+  reasoningEffort: AutomationReasoningEffort;
+  maxConcurrency: number;
+  fallbackIntervalMinutes: 1 | 5 | 15 | 30 | 60;
+  quotaAware: boolean;
+  dailyRunLimit: number | null;
+  includeLabels: string[];
+  excludeLabels: string[];
+  minimumPriority: TaskPriority;
+  requireDevelopmentContext: boolean;
+  maxRetries: number;
+  retryDelayMinutes: number;
+}
+
+export interface AutomationClaim {
+  id: string;
+  taskId: string;
+  taskIdentifier?: string;
+  projectId?: string;
+  dispatcherId: string;
+  status: AutomationClaimStatus;
+  attempt: number;
+  model: string;
+  reasoningEffort: string;
+  leaseExpiresAt: string | null;
+  nextRetryAt: string | null;
+  codexThreadId: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string;
+}
+
+export interface AutomaticProcessingQuotaStatus {
+  state: "available" | "blocked" | "unknown" | "unavailable";
+  checkedAt: number;
+  resetsAt?: number;
+  reason?: "api-key";
+}
+
+export interface AutomaticProcessingStatus {
+  state: AutomaticProcessingState;
+  pauseReason: "quota" | "daily_limit" | null;
+  lastReconciledAt: string | null;
+  nextFallbackAt: string | null;
+  candidateCount: number;
+  activeCount: number;
+  maxConcurrency: number;
+  quota: AutomaticProcessingQuotaStatus | null;
+  today: {
+    started: number;
+    completed: number;
+    failed: number;
+    inputTokens: number;
+    outputTokens: number;
+  };
+  lastError: string | null;
+  recentClaims: AutomationClaim[];
 }
 
 export type AiChatSandbox = "read-only" | "workspace-write" | "danger-full-access";

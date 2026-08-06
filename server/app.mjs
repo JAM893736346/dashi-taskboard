@@ -16,7 +16,13 @@ import {
   isTaskStatus,
 } from "../shared/domain.mjs";
 import { normalizeWorkflowSnapshot } from "../shared/workflow-control-flow.mjs";
+import { normalizeAutomaticProcessingSettings } from "../shared/automatic-processing.mjs";
+import { readCodexQuotaStatus } from "../scripts/codex-rate-limits.mjs";
 import { AiChatService } from "./ai-chat.mjs";
+import { AutomaticProcessingDispatcher } from "./automatic-processing.mjs";
+import { createAutomaticProcessingBusinessStore } from "./automatic-processing-business.mjs";
+import { createAutomaticProcessingConfigStore } from "./automatic-processing-config.mjs";
+import { runAutomaticProcessingIssue } from "./automatic-processing-runner.mjs";
 import { createCloudConfigStore } from "./cloud-config.mjs";
 import { listCodexActivity, listCodexHistory } from "./codex-history.mjs";
 import {
@@ -1011,6 +1017,7 @@ function parseAiTurn(body) {
 class EventHub {
   constructor() {
     this.clients = new Set();
+    this.listeners = new Set();
     this.keepAlive = setInterval(() => {
       for (const response of this.clients) response.write(": keep-alive\n\n");
     }, 20_000);
@@ -1039,12 +1046,23 @@ class EventHub {
     };
     const message = `event: ${type}\ndata: ${JSON.stringify(event)}\n\n`;
     for (const response of this.clients) response.write(message);
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch {}
+    }
+  }
+
+  subscribe(listener) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   close() {
     clearInterval(this.keepAlive);
     for (const response of this.clients) response.end();
     this.clients.clear();
+    this.listeners.clear();
   }
 }
 
@@ -1360,6 +1378,8 @@ export function resolveServerOptions(options = {}) {
     databasePath: options.databasePath ?? path.join(dataDirectory, "taskboard.sqlite"),
     attachmentsDirectory: options.attachmentsDirectory ?? path.join(dataDirectory, "attachments"),
     cloudConfigPath: options.cloudConfigPath ?? path.join(dataDirectory, "cloud-companion.json"),
+    automaticProcessingConfigPath: options.automaticProcessingConfigPath
+      ?? path.join(dataDirectory, "automatic-processing.json"),
     staticDirectory: options.staticDirectory ?? path.join(PROJECT_ROOT, "dist", "web"),
     skillPath: options.skillPath ?? path.join(PROJECT_ROOT, "skills", "manage-taskboard", "SKILL.md"),
     codexExecutable: options.codexExecutable ?? process.env.CODEX_EXECUTABLE ?? "codex",
@@ -1406,6 +1426,37 @@ export function createTaskboardServer(options = {}) {
         candidate.type === "worktree" && candidate.branch === context.branch
       )) ?? null;
     },
+  });
+  const automaticProcessingConfig = options.automaticProcessingConfigStore
+    ?? createAutomaticProcessingConfigStore({
+      configPath: resolved.automaticProcessingConfigPath,
+    });
+  const automaticProcessingBusiness = options.automaticProcessingBusinessStore
+    ?? createAutomaticProcessingBusinessStore({ database, cloudConfig, cloudProxy });
+  const dispatcher = new AutomaticProcessingDispatcher({
+    configStore: automaticProcessingConfig,
+    businessStore: automaticProcessingBusiness,
+    runner: options.automaticProcessingRunner ?? runAutomaticProcessingIssue,
+    quotaReader: options.automaticProcessingQuotaReader ?? readCodexQuotaStatus,
+    codexExecutable: resolved.codexExecutable,
+    manageTaskboardSkillPath: resolved.skillPath,
+    ...(options.automaticProcessingLeaseMs
+      ? { leaseMs: options.automaticProcessingLeaseMs }
+      : {}),
+    ...(options.automaticProcessingHeartbeatMs
+      ? { heartbeatMs: options.automaticProcessingHeartbeatMs }
+      : {}),
+  });
+  const unsubscribeDispatcherEvents = events.subscribe((event) => {
+    if (
+      event.type === "task.created"
+      || event.type === "task.updated"
+      || event.type === "task.moved"
+      || event.type === "task.restored"
+      || event.type === "task.relation.updated"
+    ) {
+      dispatcher.wake(event.type);
+    }
   });
   const aiChat = new AiChatService({
     database,
@@ -1484,6 +1535,59 @@ export function createTaskboardServer(options = {}) {
           return sendJson(response, 200, { mode: "local", authenticated: false });
         }
         return methodNotAllowed(response, ["GET", "PUT", "DELETE"]);
+      }
+
+      if (pathname === "/api/local/automatic-processing/settings") {
+        assertNoQuery(url.searchParams, "Automatic processing settings");
+        if (request.method === "GET") {
+          return sendJson(response, 200, { settings: dispatcher.getSettings() });
+        }
+        if (request.method === "PUT") {
+          let settings;
+          try {
+            settings = normalizeAutomaticProcessingSettings(await readJson(request));
+          } catch (error) {
+            throw new ApiError(
+              400,
+              "INVALID_AUTOMATIC_PROCESSING_SETTINGS",
+              error instanceof Error ? error.message : "Automatic processing settings are invalid",
+            );
+          }
+          return sendJson(response, 200, {
+            settings: await dispatcher.updateSettings(settings),
+          });
+        }
+        return methodNotAllowed(response, ["GET", "PUT"]);
+      }
+
+      if (pathname === "/api/local/automatic-processing/status") {
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        assertNoQuery(url.searchParams, "Automatic processing status");
+        return sendJson(response, 200, { status: await dispatcher.getStatus() });
+      }
+
+      if (pathname === "/api/local/automatic-processing/history") {
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        assertAllowedQuery(
+          url.searchParams,
+          new Set(["limit"]),
+          "Automatic processing history",
+        );
+        const rawLimit = url.searchParams.get("limit") ?? "20";
+        if (!/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 100) {
+          throw new ApiError(400, "INVALID_QUERY_PARAMETER", "'limit' must be 1 to 100");
+        }
+        return sendJson(response, 200, {
+          claims: await dispatcher.getHistory(Number(rawLimit)),
+        });
+      }
+
+      if (pathname === "/api/local/automatic-processing/reconcile") {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        assertNoQuery(url.searchParams, "Automatic processing reconciliation");
+        await assertEmptyRequestBody(request, "POST /api/local/automatic-processing/reconcile");
+        await dispatcher.reconcile("manual");
+        return sendJson(response, 200, { status: await dispatcher.getStatus() });
       }
 
       const projectMappingRoute = pathname.match(/^\/api\/local\/project-mappings\/([^/]+)$/);
@@ -1699,10 +1803,11 @@ export function createTaskboardServer(options = {}) {
         if (currentCloudConfig.remoteUrl) {
           assertLoopbackRequest(request);
           if (!isLocalCompanionRoute(pathname)) {
-            return sendFetchResponse(
-              response,
-              await cloudProxy.forward(toFetchRequest(request)),
-            );
+            const upstream = await cloudProxy.forward(toFetchRequest(request));
+            if (upstream.ok && request.method !== "GET" && request.method !== "HEAD") {
+              dispatcher.wake("cloud-mutation");
+            }
+            return sendFetchResponse(response, upstream);
           }
         }
       }
@@ -2205,6 +2310,7 @@ export function createTaskboardServer(options = {}) {
   return {
     database,
     aiChat,
+    dispatcher,
     server,
     options: resolved,
     async listen({ host = "127.0.0.1", port = resolvePort() } = {}) {
@@ -2225,7 +2331,15 @@ export function createTaskboardServer(options = {}) {
         server.listen(port, host);
       });
       listening = true;
-      return server.address();
+      const address = server.address();
+      try {
+        await dispatcher.start({ companionUrl: `http://127.0.0.1:${address.port}` });
+      } catch (error) {
+        await new Promise((resolve) => server.close(resolve));
+        listening = false;
+        throw error;
+      }
+      return address;
     },
     async close() {
       const serverClosed = listening
@@ -2233,6 +2347,8 @@ export function createTaskboardServer(options = {}) {
             server.close((error) => error ? reject(error) : resolve());
           })
         : Promise.resolve();
+      unsubscribeDispatcherEvents();
+      await dispatcher.close();
       events.close();
       for (const response of aiEventResponses) response.end();
       aiEventResponses.clear();

@@ -1,5 +1,7 @@
 import type {
   ActorIdentity,
+  AutomaticProcessingSettings,
+  AutomaticProcessingStatus,
   AiChatCatalog,
   AiChatAttachmentInput,
   AiChatRun,
@@ -7,6 +9,7 @@ import type {
   AiChatThread,
   AiChatThreadSnapshot,
   Attachment,
+  AutomationClaim,
   Comment,
   CodexThreadActivity,
   CodexHistoryThread,
@@ -257,6 +260,66 @@ export async function listDeviceWorkspaces(signal?: AbortSignal): Promise<Record
     if (error instanceof ApiError && error.code === "LOCAL_COMPANION_REQUIRED") return {};
     throw error;
   }
+}
+
+export async function getAutomaticProcessingSettings(
+  signal?: AbortSignal,
+): Promise<AutomaticProcessingSettings> {
+  const data = await request<{ settings: AutomaticProcessingSettings }>(
+    "/api/local/automatic-processing/settings",
+    { signal },
+  );
+  return data.settings;
+}
+
+export async function updateAutomaticProcessingSettings(
+  settings: AutomaticProcessingSettings,
+): Promise<AutomaticProcessingSettings> {
+  const data = await request<{ settings: AutomaticProcessingSettings }>(
+    "/api/local/automatic-processing/settings",
+    { method: "PUT", body: JSON.stringify(settings) },
+  );
+  return data.settings;
+}
+
+export async function getAutomaticProcessingStatus(
+  signal?: AbortSignal,
+): Promise<AutomaticProcessingStatus> {
+  const data = await request<{ status: AutomaticProcessingStatus }>(
+    "/api/local/automatic-processing/status",
+    { signal },
+  );
+  return data.status;
+}
+
+export async function listAutomaticProcessingHistory(
+  limit = 20,
+  signal?: AbortSignal,
+): Promise<AutomationClaim[]> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  const data = await request<{ claims: AutomationClaim[] }>(
+    `/api/local/automatic-processing/history?${query}`,
+    { signal },
+  );
+  return data.claims;
+}
+
+export async function reconcileAutomaticProcessing(): Promise<AutomaticProcessingStatus> {
+  const data = await request<{ status: AutomaticProcessingStatus }>(
+    "/api/local/automatic-processing/reconcile",
+    { method: "POST" },
+  );
+  return data.status;
+}
+
+export async function saveAutomaticProcessingProjectMapping(
+  projectId: string,
+  workspacePath: string,
+): Promise<void> {
+  await request(`/api/local/project-mappings/${encodeURIComponent(projectId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ workspacePath }),
+  });
 }
 
 export async function listWorkflowCapabilities(

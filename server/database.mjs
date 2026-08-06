@@ -1,7 +1,12 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+
+import {
+  isAutomaticProcessingTaskEligible,
+  mappedAutomaticProcessingProjectIds,
+} from "../shared/automatic-processing.mjs";
 
 export class ApiError extends Error {
   constructor(status, code, message, details) {
@@ -156,6 +161,34 @@ function aiChatThreadFromRow(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function automationClaimFromRow(row) {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    ...(row.task_identifier ? { taskIdentifier: row.task_identifier } : {}),
+    ...(row.project_id ? { projectId: row.project_id } : {}),
+    dispatcherId: row.dispatcher_id,
+    status: row.status,
+    attempt: row.attempt,
+    model: row.model,
+    reasoningEffort: row.reasoning_effort,
+    leaseExpiresAt: row.lease_expires_at,
+    nextRetryAt: row.next_retry_at,
+    codexThreadId: row.codex_thread_id,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    error: row.error,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function hashLeaseToken(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function aiChatEventFromRow(row) {
@@ -324,6 +357,39 @@ export class TaskboardDatabase {
 
       CREATE INDEX IF NOT EXISTS ai_chat_events_thread_created
         ON ai_chat_events(thread_id, created_at, id);
+
+      CREATE TABLE IF NOT EXISTS automation_claims (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        dispatcher_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN (
+          'claimed', 'running', 'retry_wait', 'completed', 'failed', 'canceled'
+        )),
+        attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+        model TEXT NOT NULL,
+        reasoning_effort TEXT NOT NULL,
+        lease_token_hash TEXT NOT NULL,
+        lease_expires_at TEXT NOT NULL,
+        next_retry_at TEXT,
+        codex_thread_id TEXT,
+        input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
+        output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
+        error TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS automation_claims_updated
+        ON automation_claims(updated_at DESC, id);
+
+      CREATE INDEX IF NOT EXISTS automation_claims_task
+        ON automation_claims(task_id, created_at DESC, id);
+
+      CREATE UNIQUE INDEX IF NOT EXISTS automation_claims_one_active_per_task
+        ON automation_claims(task_id)
+        WHERE status IN ('claimed', 'running', 'retry_wait');
 
     `);
 
@@ -905,6 +971,261 @@ export class TaskboardDatabase {
       }
       this.database.exec("COMMIT");
       return Number(result.changes);
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listAutomationClaims({ activeOnly = false, limit = 50 } = {}) {
+    const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(limit, 200)) : 50;
+    return this.database.prepare(`
+      SELECT
+        automation_claims.*,
+        tasks.identifier AS task_identifier,
+        tasks.project_id AS project_id
+      FROM automation_claims
+      JOIN tasks ON tasks.id = automation_claims.task_id
+      ${activeOnly ? "WHERE automation_claims.status IN ('claimed', 'running', 'retry_wait')" : ""}
+      ORDER BY automation_claims.updated_at DESC, automation_claims.id DESC
+      LIMIT ?
+    `).all(boundedLimit).map(automationClaimFromRow);
+  }
+
+  getAutomationClaim(id) {
+    const row = this.database.prepare(`
+      SELECT
+        automation_claims.*,
+        tasks.identifier AS task_identifier,
+        tasks.project_id AS project_id
+      FROM automation_claims
+      JOIN tasks ON tasks.id = automation_claims.task_id
+      WHERE automation_claims.id = ?
+    `).get(id);
+    return row ? automationClaimFromRow(row) : null;
+  }
+
+  claimAutomaticTask({
+    candidateIds,
+    settings,
+    dispatcherId,
+    model,
+    reasoningEffort,
+    leaseMs,
+    dayStart,
+    projectMappings = {},
+  }) {
+    const timestamp = now();
+    const leaseExpiresAt = new Date(Date.now() + leaseMs).toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const occupied = this.database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM automation_claims
+        WHERE status IN ('claimed', 'running')
+      `).get().count;
+      const claimedReservations = this.database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM automation_claims
+        WHERE status = 'claimed'
+      `).get().count;
+      const startedToday = dayStart
+        ? this.database.prepare(`
+            SELECT COALESCE(SUM(attempt), 0) AS count
+            FROM automation_claims
+            WHERE started_at >= ?
+          `).get(dayStart).count
+        : 0;
+      if (
+        occupied >= settings.maxConcurrency
+        || (
+          settings.dailyRunLimit !== null
+          && startedToday + claimedReservations >= settings.dailyRunLimit
+        )
+      ) {
+        this.database.exec("COMMIT");
+        return { claim: null, task: null };
+      }
+
+      const activeTaskIds = new Set(this.database.prepare(`
+        SELECT task_id FROM automation_claims
+        WHERE status IN ('claimed', 'running', 'retry_wait')
+      `).all().map((row) => row.task_id));
+      const enabledProjectIds = mappedAutomaticProcessingProjectIds(
+        this.listProjects().map((project) => ({
+          ...project,
+          workspacePath: projectMappings[project.id] ?? project.workspacePath,
+        })),
+        settings,
+      );
+      for (const candidateId of candidateIds) {
+        const task = this.getTask(candidateId);
+        if (!task || !isAutomaticProcessingTaskEligible(task, {
+          enabledProjectIds,
+          activeTaskIds,
+          settings,
+        })) continue;
+
+        const claimId = randomUUID();
+        const leaseToken = randomBytes(32).toString("base64url");
+        this.database.prepare(`
+          INSERT INTO automation_claims (
+            id, task_id, dispatcher_id, status, attempt, model, reasoning_effort,
+            lease_token_hash, lease_expires_at, next_retry_at, codex_thread_id,
+            input_tokens, output_tokens, error,
+            created_at, started_at, finished_at, updated_at
+          ) VALUES (?, ?, ?, 'claimed', 0, ?, ?, ?, ?, NULL, NULL, 0, 0, NULL, ?, NULL, NULL, ?)
+        `).run(
+          claimId,
+          task.id,
+          dispatcherId,
+          model,
+          reasoningEffort,
+          hashLeaseToken(leaseToken),
+          leaseExpiresAt,
+          timestamp,
+          timestamp,
+        );
+        const moved = this.database.prepare(`
+          UPDATE tasks
+          SET status = 'in_progress', version = version + 1, updated_at = ?
+          WHERE id = ? AND version = ? AND status = 'todo' AND archived_at IS NULL
+        `).run(timestamp, task.id, task.version);
+        if (moved.changes !== 1) throw new Error("Automatic Claim lost its task version");
+        this.database.exec("COMMIT");
+        return {
+          claim: this.getAutomationClaim(claimId),
+          task: this.getTask(task.id),
+          leaseToken,
+        };
+      }
+      this.database.exec("COMMIT");
+      return { claim: null, task: null };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  markAutomationClaimRunning(id, leaseToken, { leaseMs, codexThreadId }) {
+    const timestamp = now();
+    const result = this.database.prepare(`
+      UPDATE automation_claims
+      SET
+        status = 'running',
+        attempt = attempt + 1,
+        lease_expires_at = ?,
+        next_retry_at = NULL,
+        codex_thread_id = COALESCE(?, codex_thread_id),
+        started_at = ?,
+        finished_at = NULL,
+        updated_at = ?
+      WHERE id = ?
+        AND lease_token_hash = ?
+        AND status IN ('claimed', 'retry_wait')
+    `).run(
+      new Date(Date.now() + leaseMs).toISOString(),
+      codexThreadId ?? null,
+      timestamp,
+      timestamp,
+      id,
+      hashLeaseToken(leaseToken),
+    );
+    if (result.changes !== 1) throw new ApiError(409, "CLAIM_LEASE_CONFLICT", "Claim lease is no longer active");
+    return this.getAutomationClaim(id);
+  }
+
+  heartbeatAutomationClaim(id, leaseToken, leaseMs) {
+    const timestamp = now();
+    const result = this.database.prepare(`
+      UPDATE automation_claims
+      SET lease_expires_at = ?, updated_at = ?
+      WHERE id = ? AND lease_token_hash = ? AND status = 'running'
+    `).run(
+      new Date(Date.now() + leaseMs).toISOString(),
+      timestamp,
+      id,
+      hashLeaseToken(leaseToken),
+    );
+    if (result.changes !== 1) throw new ApiError(409, "CLAIM_LEASE_CONFLICT", "Claim lease is no longer running");
+    return this.getAutomationClaim(id);
+  }
+
+  finishAutomationClaim(id, leaseToken, {
+    status,
+    error = null,
+    nextRetryAt = null,
+    codexThreadId = null,
+    inputTokens = 0,
+    outputTokens = 0,
+  }) {
+    if (!["retry_wait", "completed", "failed", "canceled"].includes(status)) {
+      throw new ApiError(400, "INVALID_CLAIM_STATUS", "Claim cannot finish with this status");
+    }
+    const timestamp = now();
+    const terminal = status !== "retry_wait";
+    const result = this.database.prepare(`
+      UPDATE automation_claims
+      SET
+        status = ?,
+        lease_expires_at = ?,
+        next_retry_at = ?,
+        codex_thread_id = COALESCE(?, codex_thread_id),
+        input_tokens = input_tokens + ?,
+        output_tokens = output_tokens + ?,
+        error = ?,
+        finished_at = ?,
+        updated_at = ?
+      WHERE id = ?
+        AND lease_token_hash = ?
+        AND status IN ('claimed', 'running', 'retry_wait')
+    `).run(
+      status,
+      nextRetryAt ?? timestamp,
+      nextRetryAt,
+      codexThreadId,
+      Math.max(0, Math.floor(inputTokens)),
+      Math.max(0, Math.floor(outputTokens)),
+      error,
+      terminal ? timestamp : null,
+      timestamp,
+      id,
+      hashLeaseToken(leaseToken),
+    );
+    if (result.changes !== 1) throw new ApiError(409, "CLAIM_LEASE_CONFLICT", "Claim lease is no longer active");
+    return this.getAutomationClaim(id);
+  }
+
+  reconcileExpiredAutomationClaims({ maxRetries, retryDelayMinutes }) {
+    const timestamp = now();
+    const nextRetryAt = new Date(Date.now() + retryDelayMinutes * 60_000).toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const retry = this.database.prepare(`
+        UPDATE automation_claims
+        SET
+          status = 'retry_wait',
+          next_retry_at = ?,
+          lease_expires_at = ?,
+          error = COALESCE(error, 'Taskboard service restarted during execution'),
+          updated_at = ?
+        WHERE status IN ('claimed', 'running')
+          AND lease_expires_at <= ?
+          AND attempt <= ?
+      `).run(nextRetryAt, nextRetryAt, timestamp, timestamp, maxRetries);
+      const failed = this.database.prepare(`
+        UPDATE automation_claims
+        SET
+          status = 'failed',
+          error = COALESCE(error, 'Taskboard service restarted after retries were exhausted'),
+          finished_at = ?,
+          updated_at = ?
+        WHERE status IN ('claimed', 'running')
+          AND lease_expires_at <= ?
+          AND attempt > ?
+      `).run(timestamp, timestamp, timestamp, maxRetries);
+      this.database.exec("COMMIT");
+      return { retrying: Number(retry.changes), failed: Number(failed.changes) };
     } catch (error) {
       this.database.exec("ROLLBACK");
       throw error;

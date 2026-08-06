@@ -1,4 +1,8 @@
 import { normalizeWorkflowSnapshot } from "../../shared/workflow-control-flow.mjs";
+import {
+  isAutomaticProcessingTaskEligible,
+  normalizeAutomaticProcessingSettings,
+} from "../../shared/automatic-processing.mjs";
 
 const JSON_BODY_LIMIT = 1024 * 1024;
 const ATTACHMENT_BODY_LIMIT = 25 * 1024 * 1024;
@@ -539,6 +543,30 @@ function taskRelationSummaryFromRow(row) {
   };
 }
 
+function automationClaimFromRow(row) {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    ...(row.task_identifier ? { taskIdentifier: row.task_identifier } : {}),
+    ...(row.project_id ? { projectId: row.project_id } : {}),
+    dispatcherId: row.dispatcher_id,
+    status: row.status,
+    attempt: row.attempt,
+    model: row.model,
+    reasoningEffort: row.reasoning_effort,
+    leaseExpiresAt: row.lease_expires_at,
+    nextRetryAt: row.next_retry_at,
+    codexThreadId: row.codex_thread_id,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    error: row.error,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function commentFromRow(row, attachments = []) {
   return {
     id: row.id,
@@ -686,6 +714,370 @@ async function hydrateTask(env, row) {
 async function getTask(env, id) {
   const row = await taskRow(env, id);
   return row ? hydrateTask(env, row) : null;
+}
+
+async function hashLeaseToken(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function parseAutomaticSettings(value) {
+  try {
+    return normalizeAutomaticProcessingSettings(value);
+  } catch (error) {
+    throw new ApiError(
+      400,
+      "INVALID_AUTOMATIC_PROCESSING_SETTINGS",
+      error instanceof Error ? error.message : "Automatic processing settings are invalid",
+    );
+  }
+}
+
+function parseAutomationClaimAcquire(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set([
+    "candidateIds",
+    "settings",
+    "dispatcherId",
+    "model",
+    "reasoningEffort",
+    "leaseMs",
+    "dayStart",
+  ]));
+  if (
+    !Array.isArray(body.candidateIds)
+    || body.candidateIds.length > 100
+    || body.candidateIds.some((id) => typeof id !== "string" || !id || id.length > 128)
+  ) {
+    throw new ApiError(400, "INVALID_FIELD", "'candidateIds' must contain at most 100 task ids");
+  }
+  const settings = parseAutomaticSettings(body.settings);
+  const dispatcherId = stringField(body.dispatcherId, "dispatcherId", {
+    required: true,
+    maxLength: 128,
+  });
+  const model = stringField(body.model, "model", { required: true, maxLength: 128 });
+  const reasoningEffort = stringField(body.reasoningEffort, "reasoningEffort", {
+    required: true,
+    maxLength: 32,
+  });
+  if (model !== settings.executionModel || reasoningEffort !== settings.reasoningEffort) {
+    throw new ApiError(400, "INVALID_FIELD", "Claim model settings must match the policy");
+  }
+  if (!Number.isSafeInteger(body.leaseMs) || body.leaseMs < 30_000 || body.leaseMs > 3_600_000) {
+    throw new ApiError(400, "INVALID_FIELD", "'leaseMs' must be 30000 to 3600000");
+  }
+  const dayStart = stringField(body.dayStart, "dayStart", { required: true, maxLength: 40 });
+  if (!Number.isFinite(Date.parse(dayStart))) {
+    throw new ApiError(400, "INVALID_FIELD", "'dayStart' must be an ISO timestamp");
+  }
+  return {
+    candidateIds: [...new Set(body.candidateIds)],
+    settings,
+    dispatcherId,
+    model,
+    reasoningEffort,
+    leaseMs: body.leaseMs,
+    dayStart,
+  };
+}
+
+function parseAutomationClaimLifecycle(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set([
+    "action",
+    "leaseToken",
+    "leaseMs",
+    "nextRetryAt",
+    "codexThreadId",
+    "inputTokens",
+    "outputTokens",
+    "error",
+  ]));
+  if (!["running", "heartbeat", "completed", "retry_wait", "failed", "canceled"].includes(body.action)) {
+    throw new ApiError(400, "INVALID_FIELD", "'action' is not a supported Claim lifecycle action");
+  }
+  const leaseToken = stringField(body.leaseToken, "leaseToken", {
+    required: true,
+    maxLength: 256,
+  });
+  const leaseMs = body.leaseMs === undefined
+    ? undefined
+    : parseBoundedInteger(body.leaseMs, "leaseMs", 30_000, 3_600_000);
+  if ((body.action === "running" || body.action === "heartbeat") && leaseMs === undefined) {
+    throw new ApiError(400, "INVALID_FIELD", "'leaseMs' is required for this action");
+  }
+  const inputTokens = body.inputTokens === undefined
+    ? 0
+    : parseBoundedInteger(body.inputTokens, "inputTokens", 0, 1_000_000_000);
+  const outputTokens = body.outputTokens === undefined
+    ? 0
+    : parseBoundedInteger(body.outputTokens, "outputTokens", 0, 1_000_000_000);
+  const nextRetryAt = stringField(body.nextRetryAt ?? null, "nextRetryAt", {
+    nullable: true,
+    maxLength: 40,
+  });
+  if (body.action === "retry_wait" && !Number.isFinite(Date.parse(nextRetryAt ?? ""))) {
+    throw new ApiError(400, "INVALID_FIELD", "'nextRetryAt' is required for retry_wait");
+  }
+  return {
+    action: body.action,
+    leaseToken,
+    leaseMs,
+    nextRetryAt,
+    codexThreadId: stringField(body.codexThreadId ?? null, "codexThreadId", {
+      nullable: true,
+      maxLength: 256,
+    }),
+    inputTokens,
+    outputTokens,
+    error: stringField(body.error ?? null, "error", { nullable: true, maxLength: 65_536 }),
+  };
+}
+
+function parseBoundedInteger(value, name, minimum, maximum) {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new ApiError(400, "INVALID_FIELD", `'${name}' must be ${minimum} to ${maximum}`);
+  }
+  return value;
+}
+
+async function listAutomationClaims(env, { activeOnly, limit }) {
+  const rows = await all(env.DB.prepare(`
+    SELECT
+      automation_claims.*,
+      tasks.identifier AS task_identifier,
+      tasks.project_id AS project_id
+    FROM automation_claims
+    JOIN tasks ON tasks.id = automation_claims.task_id
+    ${activeOnly ? "WHERE automation_claims.status IN ('claimed', 'running', 'retry_wait')" : ""}
+    ORDER BY automation_claims.updated_at DESC, automation_claims.id DESC
+    LIMIT ?
+  `).bind(limit));
+  return rows.map(automationClaimFromRow);
+}
+
+async function getAutomationClaim(env, id) {
+  const row = await env.DB.prepare(`
+    SELECT
+      automation_claims.*,
+      tasks.identifier AS task_identifier,
+      tasks.project_id AS project_id
+    FROM automation_claims
+    JOIN tasks ON tasks.id = automation_claims.task_id
+    WHERE automation_claims.id = ?
+  `).bind(id).first();
+  return row ? automationClaimFromRow(row) : null;
+}
+
+async function acquireAutomationClaim(env, input) {
+  const occupied = await env.DB.prepare(`
+    SELECT COUNT(*) AS count FROM automation_claims WHERE status IN ('claimed', 'running')
+  `).first("count");
+  const claimedReservations = await env.DB.prepare(`
+    SELECT COUNT(*) AS count FROM automation_claims WHERE status = 'claimed'
+  `).first("count");
+  const startedToday = await env.DB.prepare(`
+    SELECT COALESCE(SUM(attempt), 0) AS count FROM automation_claims WHERE started_at >= ?
+  `).bind(input.dayStart).first("count");
+  if (
+    occupied >= input.settings.maxConcurrency
+    || (
+      input.settings.dailyRunLimit !== null
+      && startedToday + claimedReservations >= input.settings.dailyRunLimit
+    )
+  ) return { claim: null, task: null };
+
+  const activeTaskIds = new Set((await all(env.DB.prepare(`
+    SELECT task_id FROM automation_claims WHERE status IN ('claimed', 'running', 'retry_wait')
+  `))).map((row) => row.task_id));
+  for (const candidateId of input.candidateIds) {
+    const task = await getTask(env, candidateId);
+    if (!task) continue;
+    const enabledProjectIds = new Set(
+      input.settings.projectMode === "all" ? [task.projectId] : input.settings.projectIds,
+    );
+    if (!isAutomaticProcessingTaskEligible(task, {
+      enabledProjectIds,
+      activeTaskIds,
+      settings: input.settings,
+    })) continue;
+
+    const claimId = uuid();
+    const leaseToken = `${uuid()}${uuid()}`;
+    const timestamp = now();
+    const leaseExpiresAt = new Date(Date.now() + input.leaseMs).toISOString();
+    let results;
+    try {
+      results = await env.DB.batch([
+        env.DB.prepare(`
+          INSERT INTO automation_claims (
+            id, task_id, dispatcher_id, status, attempt, model, reasoning_effort,
+            lease_token_hash, lease_expires_at, next_retry_at, codex_thread_id,
+            input_tokens, output_tokens, error,
+            created_at, started_at, finished_at, updated_at
+          )
+          SELECT ?, tasks.id, ?, 'claimed', 0, ?, ?, ?, ?, NULL, NULL, 0, 0, NULL, ?, NULL, NULL, ?
+          FROM tasks
+          WHERE tasks.id = ?
+            AND tasks.status = 'todo'
+            AND tasks.version = ?
+            AND tasks.archived_at IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM automation_claims
+              WHERE task_id = tasks.id AND status IN ('claimed', 'running', 'retry_wait')
+            )
+            AND (
+              SELECT COUNT(*) FROM automation_claims
+              WHERE status IN ('claimed', 'running')
+            ) < ?
+            AND (
+              ? IS NULL
+              OR (
+                SELECT COALESCE(SUM(attempt), 0) FROM automation_claims
+                WHERE started_at >= ?
+              ) + (
+                SELECT COUNT(*) FROM automation_claims
+                WHERE status = 'claimed'
+              ) < ?
+            )
+        `).bind(
+          claimId,
+          input.dispatcherId,
+          input.model,
+          input.reasoningEffort,
+          await hashLeaseToken(leaseToken),
+          leaseExpiresAt,
+          timestamp,
+          timestamp,
+          task.id,
+          task.version,
+          input.settings.maxConcurrency,
+          input.settings.dailyRunLimit,
+          input.dayStart,
+          input.settings.dailyRunLimit,
+        ),
+        env.DB.prepare(`
+          UPDATE tasks
+          SET status = 'in_progress', version = version + 1, updated_at = ?
+          WHERE id = ? AND version = ? AND status = 'todo' AND archived_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM automation_claims
+              WHERE id = ? AND task_id = tasks.id AND status = 'claimed'
+            )
+        `).bind(
+          timestamp,
+          task.id,
+          task.version,
+          claimId,
+        ),
+      ]);
+    } catch (error) {
+      if (String(error?.message).includes("UNIQUE constraint failed")) continue;
+      throw error;
+    }
+    if (!changed(results[0]) || !changed(results[1])) continue;
+    return {
+      claim: await getAutomationClaim(env, claimId),
+      task: await getTask(env, task.id),
+      leaseToken,
+    };
+  }
+  return { claim: null, task: null };
+}
+
+async function updateAutomationClaimLifecycle(env, id, input) {
+  const leaseHash = await hashLeaseToken(input.leaseToken);
+  const timestamp = now();
+  let result;
+  if (input.action === "running") {
+    result = await env.DB.prepare(`
+      UPDATE automation_claims
+      SET status = 'running', attempt = attempt + 1, lease_expires_at = ?,
+          next_retry_at = NULL, codex_thread_id = COALESCE(?, codex_thread_id),
+          started_at = ?, finished_at = NULL, updated_at = ?
+      WHERE id = ? AND lease_token_hash = ? AND status IN ('claimed', 'retry_wait')
+    `).bind(
+      new Date(Date.now() + input.leaseMs).toISOString(),
+      input.codexThreadId,
+      timestamp,
+      timestamp,
+      id,
+      leaseHash,
+    ).run();
+  } else if (input.action === "heartbeat") {
+    result = await env.DB.prepare(`
+      UPDATE automation_claims SET lease_expires_at = ?, updated_at = ?
+      WHERE id = ? AND lease_token_hash = ? AND status = 'running'
+    `).bind(
+      new Date(Date.now() + input.leaseMs).toISOString(),
+      timestamp,
+      id,
+      leaseHash,
+    ).run();
+  } else {
+    const terminal = input.action !== "retry_wait";
+    result = await env.DB.prepare(`
+      UPDATE automation_claims
+      SET status = ?, lease_expires_at = ?, next_retry_at = ?,
+          codex_thread_id = COALESCE(?, codex_thread_id),
+          input_tokens = input_tokens + ?, output_tokens = output_tokens + ?,
+          error = ?, finished_at = ?, updated_at = ?
+      WHERE id = ? AND lease_token_hash = ?
+        AND status IN ('claimed', 'running', 'retry_wait')
+    `).bind(
+      input.action,
+      input.nextRetryAt ?? timestamp,
+      input.nextRetryAt,
+      input.codexThreadId,
+      input.inputTokens,
+      input.outputTokens,
+      input.error,
+      terminal ? timestamp : null,
+      timestamp,
+      id,
+      leaseHash,
+    ).run();
+  }
+  if (!changed(result)) {
+    throw new ApiError(409, "CLAIM_LEASE_CONFLICT", "Claim lease is no longer active");
+  }
+  return getAutomationClaim(env, id);
+}
+
+async function reconcileExpiredAutomationClaims(env, input) {
+  assertPlainObject(input);
+  assertAllowedKeys(input, new Set(["maxRetries", "retryDelayMinutes"]));
+  const maxRetries = parseBoundedInteger(input.maxRetries, "maxRetries", 0, 5);
+  const retryDelayMinutes = parseBoundedInteger(
+    input.retryDelayMinutes,
+    "retryDelayMinutes",
+    1,
+    1_440,
+  );
+  const timestamp = now();
+  const nextRetryAt = new Date(Date.now() + retryDelayMinutes * 60_000).toISOString();
+  const results = await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE automation_claims
+      SET status = 'retry_wait', next_retry_at = ?, lease_expires_at = ?,
+          error = COALESCE(error, 'Taskboard service restarted during execution'), updated_at = ?
+      WHERE status IN ('claimed', 'running') AND lease_expires_at <= ? AND attempt <= ?
+    `).bind(nextRetryAt, nextRetryAt, timestamp, timestamp, maxRetries),
+    env.DB.prepare(`
+      UPDATE automation_claims
+      SET status = 'failed',
+          error = COALESCE(error, 'Taskboard service restarted after retries were exhausted'),
+          finished_at = ?, updated_at = ?
+      WHERE status IN ('claimed', 'running') AND lease_expires_at <= ? AND attempt > ?
+    `).bind(timestamp, timestamp, timestamp, maxRetries),
+  ]);
+  return {
+    retrying: Number(results[0].meta.changes),
+    failed: Number(results[1].meta.changes),
+  };
 }
 
 function parseProjectCreate(body) {
@@ -2033,6 +2425,62 @@ async function routeApi(request, env, actor, url) {
       SELECT revision FROM global_revision WHERE singleton = 1
     `).first("revision");
     return json(200, { changed: revision > since, revision });
+  }
+
+  if (pathname === "/api/automation/claims") {
+    if (request.method !== "GET") methodNotAllowed(["GET"]);
+    const unknown = [...url.searchParams.keys()].filter(
+      (key) => key !== "active" && key !== "limit",
+    );
+    if (unknown.length > 0) {
+      throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", `Unknown query parameter: ${unknown[0]}`);
+    }
+    const activeValue = url.searchParams.get("active") ?? "false";
+    if (activeValue !== "true" && activeValue !== "false") {
+      throw new ApiError(400, "INVALID_QUERY_PARAMETER", "'active' must be true or false");
+    }
+    const rawLimit = url.searchParams.get("limit") ?? "50";
+    if (!/^\d+$/.test(rawLimit)) {
+      throw new ApiError(400, "INVALID_QUERY_PARAMETER", "'limit' must be an integer");
+    }
+    const limit = parseBoundedInteger(Number(rawLimit), "limit", 1, 200);
+    return json(200, {
+      claims: await listAutomationClaims(env, {
+        activeOnly: activeValue === "true",
+        limit,
+      }),
+    });
+  }
+
+  if (pathname === "/api/automation/claims/acquire") {
+    if (request.method !== "POST") methodNotAllowed(["POST"]);
+    requireNoQuery(url, "Claim acquisition");
+    return json(200, await acquireAutomationClaim(
+      env,
+      parseAutomationClaimAcquire(await readJson(request)),
+    ));
+  }
+
+  if (pathname === "/api/automation/claims/reconcile-expired") {
+    if (request.method !== "POST") methodNotAllowed(["POST"]);
+    requireNoQuery(url, "Claim reconciliation");
+    return json(200, await reconcileExpiredAutomationClaims(env, await readJson(request)));
+  }
+
+  const automationClaimLifecycleMatch = pathname.match(
+    /^\/api\/automation\/claims\/([^/]+)\/lifecycle$/,
+  );
+  if (automationClaimLifecycleMatch) {
+    if (request.method !== "POST") methodNotAllowed(["POST"]);
+    requireNoQuery(url, "Claim lifecycle");
+    const claimId = decodePathPart(automationClaimLifecycleMatch[1], "Claim id");
+    return json(200, {
+      claim: await updateAutomationClaimLifecycle(
+        env,
+        claimId,
+        parseAutomationClaimLifecycle(await readJson(request)),
+      ),
+    });
   }
 
   if (

@@ -39,7 +39,7 @@ The repository's development rules require the direct path to work and be shown 
 - Create: `shared/automatic-processing.mjs`
 - Create: `shared/automatic-processing.d.mts`
 
-- [ ] **Step 1: Define the complete global defaults and strict normalization**
+- [x] **Step 1: Define the complete global defaults and strict normalization**
 
 Export this settings shape and reject unknown, missing, or out-of-range values at the HTTP boundary:
 
@@ -65,7 +65,7 @@ export const DEFAULT_AUTOMATIC_PROCESSING_SETTINGS = Object.freeze({
 });
 ```
 
-- [ ] **Step 2: Implement fixed eligibility and deterministic ranking**
+- [x] **Step 2: Implement fixed eligibility and deterministic ranking**
 
 `rankAutomaticProcessingCandidates({ tasks, projects, activeTaskIds, settings, lastProjectId })` must:
 
@@ -85,7 +85,7 @@ task.status === "todo"
 
 Choose the next project after `lastProjectId` in stable project order, then sort only that project's tasks by `board-order`, `priority-first`, or `due-date-first`, always ending with `sortOrder`, `createdAt`, and `id` tie breakers.
 
-- [ ] **Step 3: Verify the module can be imported and the empty list stays empty**
+- [x] **Step 3: Verify the module can be imported and the empty list stays empty**
 
 Run:
 
@@ -101,11 +101,11 @@ Expected: exit 0 with no output.
 - Create: `server/automatic-processing-config.mjs`
 - Modify: `server/database.mjs`
 
-- [ ] **Step 1: Add atomic device-local settings persistence**
+- [x] **Step 1: Add atomic device-local settings persistence**
 
 Implement `createAutomaticProcessingConfigStore({ configPath })` with serialized updates, `read()` returning defaults on `ENOENT`, and `write(settings)` using a sibling temporary file, mode `0600`, and atomic rename.
 
-- [ ] **Step 2: Add the local Claim schema and row mapper**
+- [x] **Step 2: Add the local Claim schema and row mapper**
 
 Create `automation_claims` with the approved columns and this active constraint:
 
@@ -117,7 +117,7 @@ WHERE status IN ('claimed', 'running', 'retry_wait');
 
 Store only `lease_token_hash`; return a raw random lease token only from acquisition.
 
-- [ ] **Step 3: Add local Claim lifecycle methods**
+- [x] **Step 3: Add local Claim lifecycle methods**
 
 Implement these `TaskboardDatabase` methods:
 
@@ -132,7 +132,7 @@ reconcileExpiredAutomationClaims({ maxRetries, retryDelayMinutes })
 
 `claimAutomaticTask` must use `BEGIN IMMEDIATE`, re-read each candidate by ID/version, re-run shared eligibility against its hydrated relations, insert one Claim, update that exact task from `todo` to `in_progress` with `version = version + 1`, and commit both changes together. A changed candidate produces no mutation and tries the next ID.
 
-- [ ] **Step 4: Verify schema initialization and empty Claim history**
+- [x] **Step 4: Verify schema initialization and empty Claim history**
 
 Run a Node one-liner that creates a temporary `TaskboardDatabase`, asserts `listAutomationClaims()` returns `[]`, closes it, and removes the temporary directory.
 
@@ -145,11 +145,11 @@ Expected: exit 0.
 - Modify: `cloud/src/index.mjs`
 - Modify: `test/helpers/cloud-worker-harness.mjs`
 
-- [ ] **Step 1: Add equivalent D1 storage**
+- [x] **Step 1: Add equivalent D1 storage**
 
 The migration must create `automation_claims`, its task/history indexes, its partial active unique index, and insert/update/delete revision triggers.
 
-- [ ] **Step 2: Add strict Claim request parsers and hashing**
+- [x] **Step 2: Add strict Claim request parsers and hashing**
 
 Accept only:
 
@@ -166,7 +166,7 @@ Accept only:
 
 Lifecycle updates accept `leaseToken` plus one exact action: `running`, `heartbeat`, `completed`, `retry_wait`, `failed`, or `canceled`. Hash raw tokens with SHA-256 before comparison and never serialize the stored hash.
 
-- [ ] **Step 3: Implement authenticated Claim routes**
+- [x] **Step 3: Implement authenticated Claim routes**
 
 Add:
 
@@ -179,7 +179,7 @@ POST /api/automation/claims/reconcile-expired
 
 For each ranked candidate, hydrate and recheck eligibility, then use one D1 batch to conditionally insert the Claim and conditionally move the exact `todo` task to `in_progress`. Unique/contention failures try the next candidate; success returns `{ claim, task, leaseToken }`; no candidate returns `{ claim: null, task: null }`.
 
-- [ ] **Step 4: Update the harness migration loader and boot the Worker**
+- [x] **Step 4: Update the harness migration loader and boot the Worker**
 
 Read every sorted `cloud/migrations/*.sql` file and execute it in order. Run:
 
@@ -196,11 +196,11 @@ Expected: the existing cloud suite boots with both migrations and reports zero f
 - Create: `server/automatic-processing-runner.mjs`
 - Modify: `scripts/codex-rate-limits.mjs`
 
-- [ ] **Step 1: Route business reads and Claim mutations to the active authority**
+- [x] **Step 1: Route business reads and Claim mutations to the active authority**
 
 `createAutomaticProcessingBusinessStore({ database, cloudConfig, cloudProxy })` must call SQLite directly in local mode and `cloudProxy.forward(new Request(...))` in cloud mode. Expose `snapshot()`, `acquire()`, `markRunning()`, `heartbeat()`, `finish()`, and `reconcileExpired()`; parse non-2xx JSON into an error with the remote code.
 
-- [ ] **Step 2: Build a one-shot exact-issue Codex runner**
+- [x] **Step 2: Build a one-shot exact-issue Codex runner**
 
 Reuse `buildCodexArgs`, `buildCodexPrompt`, `normalizeCodexEvent`, and `spawnCodexTurn` from `server/ai-chat-process.mjs`. The prompt must contain:
 
@@ -214,11 +214,11 @@ Never move it directly to done.
 
 Resolve execution cwd to the issue worktree when present, otherwise the mapped project workspace. Return `{ codexThreadId, inputTokens, outputTokens }` only after `turn.completed` and exit code 0; expose the spawned child for dispatcher shutdown and emit a started callback only after the child `spawn` event.
 
-- [ ] **Step 3: Make quota reads use the configured executable**
+- [x] **Step 3: Make quota reads use the configured executable**
 
 Change `readCodexQuotaStatus(model)` to `readCodexQuotaStatus(model, { codexExecutable = "codex" } = {})` and pass that executable into the app-server spawn.
 
-- [ ] **Step 4: Verify the runner argument/prompt construction without starting real Codex**
+- [x] **Step 4: Verify the runner argument/prompt construction without starting real Codex**
 
 Run a Node import check over the new runner and existing process helper.
 
@@ -230,19 +230,19 @@ Expected: exit 0; no Codex process is started.
 - Create: `server/automatic-processing.mjs`
 - Modify: `server/app.mjs`
 
-- [ ] **Step 1: Implement event-coalesced reconciliation**
+- [x] **Step 1: Implement event-coalesced reconciliation**
 
 `AutomaticProcessingDispatcher` owns one stable dispatcher UUID, `wake()` coalescing, a fallback timer, active runs, last-served project, last/next scan times, candidate count, quota state, and last error. `reconcile()` must stop before acquisition when disabled, quota-paused, daily-limited, concurrency-full, or candidate-empty.
 
-- [ ] **Step 2: Implement Claim execution and retry lifecycle**
+- [x] **Step 2: Implement Claim execution and retry lifecycle**
 
 After acquisition, call the runner with the exact task and configured model/effort, mark the Claim `running` after spawn, heartbeat while alive, and finish it with usage. A failed run becomes `retry_wait` until the configured delay while retries remain; exhausted retries become `failed`. A manual task transition away from `in_progress` cancels the active Claim. Startup reconciles expired leases; shutdown interrupts owned children and clears timers.
 
-- [ ] **Step 3: Wire the dispatcher to real service events and cloud proxy mutations**
+- [x] **Step 3: Wire the dispatcher to real service events and cloud proxy mutations**
 
 Add `EventHub.subscribe(listener)`. Subscribe the dispatcher to local `task.created`, `task.updated`, `task.moved`, `task.restored`, and `task.relation.updated`; after a successful proxied cloud mutation, call `wake("cloud-mutation")`. Start the dispatcher only after `listen()` knows the local companion URL and close it before the database.
 
-- [ ] **Step 4: Add local-only settings and status endpoints**
+- [x] **Step 4: Add local-only settings and status endpoints**
 
 Add strict routes:
 
@@ -256,7 +256,7 @@ POST /api/local/automatic-processing/reconcile
 
 Saving settings persists first, reconfigures the fallback timer, and wakes the dispatcher. The status response distinguishes `disabled`, `idle`, `running`, `quota_paused`, `daily_limit`, and `error` and includes last/next scan, candidate count, active count, daily totals, quota, and recent Claims.
 
-- [ ] **Step 5: Prove empty reconciliation does not invoke the runner**
+- [x] **Step 5: Prove empty reconciliation does not invoke the runner**
 
 Start a temporary server with an injected runner that increments a counter, enable settings for the mapped local project, call the reconcile endpoint with no eligible tasks, and inspect `app.dispatcher.getStatus()` plus `app.database.listAutomationClaims()`.
 
@@ -271,23 +271,23 @@ Expected: runner count 0, Claim count 0, candidate count 0.
 - Modify: `web/src/App.tsx`
 - Modify: `web/src/styles.css`
 
-- [ ] **Step 1: Add typed API contracts**
+- [x] **Step 1: Add typed API contracts**
 
 Define `AutomaticProcessingSettings`, `AutomaticProcessingStatus`, `AutomationClaim`, strategy/state unions, and API functions for settings, status, history, and manual reconciliation.
 
-- [ ] **Step 2: Replace per-project localStorage/host state with one server-backed state**
+- [x] **Step 2: Replace per-project localStorage/host state with one server-backed state**
 
 Remove `PROJECT_AUTOMATIONS_KEY`, `readProjectAutomations()`, host request maps, per-project reconcile/save callbacks, and the `taskboard:automation-response` handler from `App.tsx`. Load global settings/status from the local companion, refresh status on open and every five seconds while enabled, and surface API errors without hiding the rest of the board.
 
-- [ ] **Step 3: Build the global popover**
+- [x] **Step 3: Build the global popover**
 
 The trigger uses the existing play/pause icons and appears on project home and project headers. The popover contains the master switch, all-mapped/selected segmented mode, mapped-project checkboxes, claim strategy, execution model, reasoning effort, concurrency, `兜底扫描间隔`, quota switch, daily limit, an advanced disclosure for label/priority/development-context/retry settings, current state/totals, and recent runs. Save the complete draft with one clear `保存设置` command.
 
-- [ ] **Step 4: Add responsive styling**
+- [x] **Step 4: Add responsive styling**
 
 Use the existing quiet surface colors, 5-6px controls, a maximum popover height with scrolling, two-column fields only where they remain readable, and a single-column mobile layout. Do not nest cards or use decorative gradients.
 
-- [ ] **Step 5: Run static frontend verification**
+- [x] **Step 5: Run static frontend verification**
 
 Run:
 
@@ -303,17 +303,17 @@ Expected: both commands exit 0.
 **Files:**
 - Modify only implementation files listed above if verification reveals a direct-path defect.
 
-- [ ] **Step 1: Re-read the approved design and this plan**
+- [x] **Step 1: Re-read the approved design and this plan**
 
 Confirm the empty path, exact-issue execution path, settings fields, no-`done` rule, local/cloud ownership, and unrelated-file exclusions are all represented in the diff.
 
-- [ ] **Step 2: Verify one eligible issue end to end with a fake Codex executable**
+- [x] **Step 2: Verify one eligible issue end to end with a fake Codex executable**
 
 Start a temporary server with a fake executable that emits `thread.started`, `turn.started`, and `turn.completed` usage and uses the existing HTTP task/comment endpoints to emulate the Agent's result comment plus move to `in_review`. Enable the mapped project and trigger reconciliation.
 
 Expected: exactly one process spawn; task transitions `todo -> in_progress -> in_review`; one result comment exists; Claim is `completed`; usage totals are visible; a second reconciliation starts no duplicate run.
 
-- [ ] **Step 3: Run final required checks**
+- [x] **Step 3: Run final required checks**
 
 Run:
 
@@ -326,7 +326,7 @@ git status --short
 
 Expected: typecheck/build/diff checks exit 0; status contains only the implementation plan and implementation-owned files.
 
-- [ ] **Step 4: Commit only this request's files**
+- [x] **Step 4: Commit only this request's files**
 
 Stage the exact implementation-owned paths and commit with:
 
