@@ -1093,6 +1093,7 @@
       if (!active || generation !== openGeneration) return;
       showFrame();
       postHostContext();
+      postToFrame({ type: "taskboard:opened" });
     } catch (error) {
       if (!active || generation !== openGeneration) return;
       const bindingAvailable = hasLiveHostBinding();

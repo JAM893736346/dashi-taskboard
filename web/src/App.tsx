@@ -11,6 +11,7 @@ import {
   type Dispatch,
   type SetStateAction,
 } from "react";
+import { buildCodexHistoryPreview } from "../../shared/codex-history-import.mjs";
 import {
   ApiError,
   addTaskRelation,
@@ -20,8 +21,11 @@ import {
   getTaskboardRevision,
   getWorkflowWorkspace,
   getTaskboardMetadata,
+  importCodexHistory,
+  listCodexHistory,
   listDevelopmentContexts,
   listDeviceWorkspaces,
+  listImportedCodexThreadIds,
   listProjects,
   listTasks,
   moveTask as moveTaskRequest,
@@ -383,6 +387,7 @@ export function App() {
   const [boardView, setBoardView] = useState<BoardView>("issues");
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [codexHistorySyncOpen, setCodexHistorySyncOpen] = useState(false);
+  const [codexHistorySyncRequest, setCodexHistorySyncRequest] = useState(embedded ? 0 : 1);
   const [detailTaskIdentifier, setDetailTaskIdentifier] = useState<string | null>(
     () => readIssueIdentifier(window.location.search),
   );
@@ -408,6 +413,7 @@ export function App() {
   const undoSequenceRef = useRef(0);
   const undoStackRef = useRef<UndoOperation[]>([]);
   const undoInFlightRef = useRef(false);
+  const codexHistorySyncStartedRef = useRef(0);
   const dragRegionRef = useRef<HTMLDivElement>(null);
   const selectedProjectIdRef = useRef(selectedProjectId);
   selectedProjectIdRef.current = selectedProjectId;
@@ -588,6 +594,11 @@ export function App() {
       if (event.source !== window.parent || !event.data || typeof event.data !== "object") return;
       const message = event.data as { type?: string; payload?: unknown; theme?: unknown };
 
+      if (message.type === "taskboard:opened") {
+        setCodexHistorySyncRequest((current) => current + 1);
+        return;
+      }
+
       if (message.type === "taskboard:theme" && isTheme(message.theme)) {
         setTheme(message.theme);
         return;
@@ -717,6 +728,51 @@ export function App() {
       if (!options.quiet && requestId === tasksRequestRef.current) setTasksLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    if (
+      projectsLoading
+      || codexImportProjects.length === 0
+      || codexHistorySyncRequest === 0
+      || codexHistorySyncStartedRef.current >= codexHistorySyncRequest
+    ) return;
+
+    codexHistorySyncStartedRef.current = codexHistorySyncRequest;
+    void Promise.all([
+      listCodexHistory(),
+      listImportedCodexThreadIds(),
+    ]).then(async ([threads, existingThreadIds]) => {
+      const importTasks = buildCodexHistoryPreview(
+        threads,
+        codexImportProjects,
+        existingThreadIds,
+      ).flatMap((item) => (
+        item.existing || !item.matchedProjectId
+          ? []
+          : [{
+              threadId: item.threadId,
+              projectId: item.matchedProjectId,
+              title: item.title,
+              description: item.description,
+              createdAt: item.createdAt,
+              updatedAt: item.updatedAt,
+            }]
+      ));
+      if (importTasks.length === 0) return;
+
+      const result = await importCodexHistory(importTasks);
+      if (result.imported === 0) return;
+      await refreshProjectList();
+      const projectId = selectedProjectIdRef.current;
+      if (projectId) await refreshTasks(projectId, { quiet: true });
+    }).catch(() => {});
+  }, [
+    codexHistorySyncRequest,
+    codexImportProjects,
+    projectsLoading,
+    refreshProjectList,
+    refreshTasks,
+  ]);
 
   useEffect(() => {
     if (!selectedProjectId) {
