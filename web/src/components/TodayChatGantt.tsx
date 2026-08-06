@@ -6,8 +6,8 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { listTasks } from "../api";
-import type { Project, Task } from "../types";
+import { listCodexActivity, listTasks } from "../api";
+import type { CodexActivitySegment, Project, Task } from "../types";
 import { LinearIcon } from "./LinearIcon";
 
 interface TodayChatGanttProps {
@@ -19,6 +19,7 @@ interface LoadedTask {
   task: Task;
   threadId: string;
   projectName: string;
+  activitySegments: CodexActivitySegment[];
 }
 
 interface DayWindow {
@@ -26,12 +27,17 @@ interface DayWindow {
   end: number;
 }
 
-interface GanttRow extends LoadedTask {
-  realStart: number;
-  realEnd: number;
-  durationMs: number;
+interface GanttSegment {
+  start: number;
+  end: number;
   offsetPercent: number;
   widthPercent: number;
+}
+
+interface GanttRow extends LoadedTask {
+  segments: GanttSegment[];
+  firstStart: number;
+  durationMs: number;
 }
 
 const TICKS = ["00", "04", "08", "12", "16", "20", "24"] as const;
@@ -78,7 +84,7 @@ function dateLabel(timestamp: number): string {
 
 function errorLabel(error: unknown): string {
   if (error instanceof Error) return error.message;
-  return "无法加载今日 Codex 任务";
+  return "无法加载今日 Codex 活跃时长";
 }
 
 export function TodayChatGantt({ projects, onOpenThread }: TodayChatGanttProps) {
@@ -109,10 +115,25 @@ export function TodayChatGantt({ projects, onOpenThread }: TodayChatGanttProps) 
         })),
       );
       if (controller.signal.aborted) return;
-      setLoadedTasks(taskGroups.flatMap(({ project, tasks }) => tasks.flatMap((task) => {
+      const synchronizedTasks = taskGroups.flatMap(({ project, tasks }) => tasks.flatMap((task) => {
         const threadId = task.threadId?.trim();
         return threadId ? [{ task, threadId, projectName: project.name }] : [];
-      })));
+      }));
+      const threadIds = [...new Set(synchronizedTasks.map((task) => task.threadId))];
+      const activity = threadIds.length > 0
+        ? await listCodexActivity(
+          threadIds,
+          new Date(requestDay.start).toISOString(),
+          new Date(requestDay.end).toISOString(),
+          controller.signal,
+        )
+        : [];
+      if (controller.signal.aborted) return;
+      const activityByThreadId = new Map(activity.map((entry) => [entry.threadId, entry.segments]));
+      setLoadedTasks(synchronizedTasks.flatMap((task) => {
+        const activitySegments = activityByThreadId.get(task.threadId);
+        return activitySegments?.length ? [{ ...task, activitySegments }] : [];
+      }));
     } catch (nextError) {
       if (controller.signal.aborted) return;
       setLoadedTasks([]);
@@ -133,23 +154,36 @@ export function TodayChatGantt({ projects, onOpenThread }: TodayChatGanttProps) 
   const rows = useMemo(() => {
     const dayLength = day.end - day.start;
     return loadedTasks.flatMap<GanttRow>((loadedTask) => {
-      const realStart = parseTimestamp(loadedTask.task.createdAt);
-      const updatedAt = parseTimestamp(loadedTask.task.updatedAt);
-      if (realStart === null || updatedAt === null) return [];
-      const realEnd = Math.max(realStart, updatedAt);
-      if (realEnd <= realStart || realStart >= day.end || realEnd <= day.start) return [];
-      const displayStart = Math.max(realStart, day.start);
-      const displayEnd = Math.min(realEnd, day.end);
+      const segments = loadedTask.activitySegments.flatMap<GanttSegment>((segment) => {
+        const realStart = parseTimestamp(segment.startAt);
+        const realEnd = parseTimestamp(segment.endAt);
+        if (
+          realStart === null
+          || realEnd === null
+          || realEnd <= realStart
+          || realStart >= day.end
+          || realEnd <= day.start
+        ) {
+          return [];
+        }
+        const start = Math.max(realStart, day.start);
+        const end = Math.min(realEnd, day.end);
+        return [{
+          start,
+          end,
+          offsetPercent: ((start - day.start) / dayLength) * 100,
+          widthPercent: ((end - start) / dayLength) * 100,
+        }];
+      }).sort((left, right) => left.start - right.start || left.end - right.end);
+      if (segments.length === 0) return [];
       return [{
         ...loadedTask,
-        realStart,
-        realEnd,
-        durationMs: realEnd - realStart,
-        offsetPercent: ((displayStart - day.start) / dayLength) * 100,
-        widthPercent: ((displayEnd - displayStart) / dayLength) * 100,
+        segments,
+        firstStart: segments[0].start,
+        durationMs: segments.reduce((total, segment) => total + segment.end - segment.start, 0),
       }];
     }).sort((left, right) => (
-      left.realStart - right.realStart || left.task.id.localeCompare(right.task.id)
+      left.firstStart - right.firstStart || left.task.id.localeCompare(right.task.id)
     ));
   }, [day.end, day.start, loadedTasks]);
 
@@ -169,8 +203,8 @@ export function TodayChatGantt({ projects, onOpenThread }: TodayChatGanttProps) 
         <div className="today-chat-gantt-actions">
           <dl className="today-chat-gantt-summary">
             <div><dt>任务</dt><dd>{rows.length}</dd></div>
-            <div><dt>累计</dt><dd>{durationLabel(totalDuration)}</dd></div>
-            <div><dt>最长</dt><dd>{durationLabel(longestDuration)}</dd></div>
+            <div><dt>累计活跃</dt><dd>{durationLabel(totalDuration)}</dd></div>
+            <div><dt>最长活跃</dt><dd>{durationLabel(longestDuration)}</dd></div>
           </dl>
           <button
             className="today-chat-gantt-refresh"
@@ -188,7 +222,7 @@ export function TodayChatGantt({ projects, onOpenThread }: TodayChatGanttProps) 
       {loading ? (
         <div className="today-chat-gantt-state" aria-live="polite">
           <span className="ai-chat-spinner" />
-          正在读取今日任务
+          正在估算今日活跃时长
         </div>
       ) : error ? (
         <div className="today-chat-gantt-state is-error" role="alert">
@@ -196,7 +230,7 @@ export function TodayChatGantt({ projects, onOpenThread }: TodayChatGanttProps) 
           <button type="button" onClick={() => void refresh()}>重试</button>
         </div>
       ) : rows.length === 0 ? (
-        <div className="today-chat-gantt-state">今天暂无已同步的 Codex 任务</div>
+        <div className="today-chat-gantt-state">今天暂无已同步的 Codex 活跃记录</div>
       ) : (
         <div className="today-chat-gantt-scroll">
           <div className="today-chat-gantt-chart">
@@ -212,25 +246,25 @@ export function TodayChatGantt({ projects, onOpenThread }: TodayChatGanttProps) 
                   </i>
                 ))}
               </div>
-              <span>时长</span>
+              <span>活跃</span>
             </div>
             {rows.map((row) => (
               <button
                 className="today-chat-gantt-row"
                 type="button"
                 key={row.task.id}
-                aria-label={`打开 ${row.task.title}，Codex 对话，参考耗时 ${durationLabel(row.durationMs)}`}
+                aria-label={`打开 ${row.task.title}，Codex 对话，估算活跃 ${durationLabel(row.durationMs)}`}
                 onClick={() => onOpenThread(row.threadId)}
               >
                 <span className="today-chat-gantt-label">
                   <strong>{row.task.title}</strong>
                   <small>
-                    {row.projectName} · Codex 对话 · {timeLabel(row.realStart)}
+                    {row.projectName} · 估算活跃 · {timeLabel(row.firstStart)}
                   </small>
                 </span>
                 <span
                   className="today-chat-gantt-timeline"
-                  aria-label={`${timeLabel(row.realStart)} 至 ${timeLabel(row.realEnd)}`}
+                  aria-label={`${row.segments.length} 段估算活跃，累计 ${durationLabel(row.durationMs)}`}
                 >
                   <span className="today-chat-gantt-grid" aria-hidden="true">
                     {TICKS.map((tick, index) => (
@@ -240,13 +274,16 @@ export function TodayChatGantt({ projects, onOpenThread }: TodayChatGanttProps) 
                       />
                     ))}
                   </span>
-                  <span
-                    className="today-chat-gantt-bar"
-                    style={{
-                      left: `${row.offsetPercent}%`,
-                      width: `${row.widthPercent}%`,
-                    } as CSSProperties}
-                  />
+                  {row.segments.map((segment) => (
+                    <span
+                      className="today-chat-gantt-bar"
+                      key={`${segment.start}-${segment.end}`}
+                      style={{
+                        left: `${segment.offsetPercent}%`,
+                        width: `${segment.widthPercent}%`,
+                      } as CSSProperties}
+                    />
+                  ))}
                 </span>
                 <span className="today-chat-gantt-duration">{durationLabel(row.durationMs)}</span>
               </button>

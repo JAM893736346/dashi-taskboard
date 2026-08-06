@@ -1,96 +1,112 @@
-# Today Synchronized Codex Gantt Design
+# Today Codex Active-Time Gantt Design
 
 ## Status
 
-Approved in conversation on 2026-08-06. This revision corrects the chart to use the data produced by the existing Codex history synchronization workflow.
+Approved in conversation on 2026-08-06. The user selected activity rule A: gaps of one hour or less remain part of the same estimated active session; gaps greater than one hour split the bar.
 
 ## Goal
 
-Show synchronized Codex conversations in a same-day Gantt below the project cards so the user can compare their distribution and reference duration. Each row represents one synchronized conversation whose saved interval intersects today.
+Show the estimated active time of synchronized Codex conversations on today's Gantt. Each task remains one row, but the timeline contains one or more activity fragments instead of a single `createdAt` to `updatedAt` span.
 
 ## Confirmed Operation Path
 
-1. `CodexHistorySyncDialog` submits selected history through the existing Codex import API.
-2. `/api/codex-import` calls `TaskboardDatabase.importCodexTask()`.
-3. The imported Taskboard task preserves the Codex `threadId`, `createdAt`, and `updatedAt` values.
-4. `listTasks(projectId)` returns those persisted tasks through the ordinary product API.
-5. `TodayChatGantt` projects tasks with a `threadId` onto today's timeline.
-6. Clicking a row calls the existing `App.openThread(threadId)` action, which opens the native Codex conversation in both embedded and standalone modes.
+1. Codex history synchronization creates ordinary Taskboard tasks carrying native `threadId` values.
+2. `TodayChatGantt` loads those tasks once on project-home mount or explicit refresh.
+3. The component sends only the unique synchronized thread IDs and the local-day range to `POST /api/local/codex-activity`.
+4. The local service performs one Codex App Server `thread/list`, intersects it with the supplied IDs and today's update range, then reads only those candidate threads with `thread/read(includeTurns: true)`.
+5. The service converts turn `startedAt`/`completedAt` values into merged one-hour activity sessions and returns compact segments only.
+6. The chart clips each segment to today, renders every segment in the owning task row, and sums the visible segments as estimated active time.
 
-The reported empty state occurred because the first implementation read the separate local AI Chat tables. Those tables contain no records for synchronized Codex history and are not part of this workflow.
+The route remains a local-companion capability in local and cloud modes. It does not mutate Taskboard business data or read Codex JSONL files directly.
 
-## Scope
+## Activity Semantics
 
-- Load persisted tasks for all projects once when the project-home chart mounts and on explicit manual refresh.
-- Keep only tasks with a non-empty native Codex `threadId`.
-- Use the saved `createdAt` to `updatedAt` interval as reference duration.
-- Display the browser-local day from `00:00` inclusive to the next `00:00` exclusive.
-- Include tasks whose saved interval intersects the day and clip bars to the visible day.
-- Order rows chronologically by saved creation time, then task ID.
-- Open the corresponding native Codex conversation when a row is clicked.
-- Preserve the existing summary, fixed time ticks, responsive scrolling, loading, empty, and failure states.
+For each thread:
 
-## Non-Goals
+1. Keep valid turn intervals with a numeric `startedAt` and an end later than the start.
+2. Use `completedAt` for completed turns. For an incomplete or interrupted turn, use the thread's last `updatedAt` only when it is later than the turn start.
+3. Sort intervals by start time.
+4. Merge an interval into the current segment when `next.start - current.end <= 60 minutes`. Overlapping intervals also merge.
+5. Start a new segment when the gap is greater than 60 minutes.
+6. Keep only merged segments intersecting the requested local-day range; the browser performs final clipping to its exact day boundaries.
 
-- No claim that `createdAt` to `updatedAt` is precise active execution time; it is reference-only elapsed time.
-- No direct Codex history scan during chart refresh.
-- No new HTTP route, database query, cloud contract, CLI behavior, or host bridge.
-- No automatic network polling or refresh immediately after history synchronization.
-- No AI Chat panel integration, live running-state timer, numeric benefit score, date picker, or configurable time range.
-- No new automated regression tests before the user confirms the corrected direct path works.
+Because short gaps are included, the UI labels the result `估算活跃`, not exact compute time. The row duration and summary values use the sum of today's clipped merged segments.
 
-## Component Design
+## Performance Design
 
-### `TodayChatGantt`
+### Candidate Filtering
 
-The component receives persisted projects and the existing native-thread opener:
+The browser sends all synchronized task thread IDs, but the local service does not read every thread. One inexpensive `thread/list` supplies current thread metadata. A thread becomes a read candidate only when:
 
-```ts
-interface TodayChatGanttProps {
-  projects: Project[];
-  onOpenThread: (threadId: string) => void;
+- its ID is in the supplied set;
+- `createdAt < rangeEnd`; and
+- `updatedAt > rangeStart`.
+
+This catches conversations that were imported earlier and became active today without requiring their Taskboard task timestamp to be updated.
+
+### Bounded Reads
+
+Candidate `thread/read` calls run with concurrency two. This avoids a memory spike from parsing several large conversation snapshots at once while retaining useful latency for the normal small candidate set.
+
+### Compact Cache
+
+The local service keeps at most 128 compressed activity entries in memory. The key includes Codex executable, thread ID, and thread `updatedAt`; unchanged threads reuse their compressed segments without another `thread/read`. The cache stores no conversation content and is naturally cleared when the service exits.
+
+### Request Policy
+
+There is no polling. The chart performs its task-list fan-out and one batched activity request only on first mount, when the persisted project-ID set changes, or when the user clicks refresh.
+
+Measured discovery evidence on the current machine is informational, not a guarantee: listing 65 threads took about 0.129 seconds, and a fresh process plus one 17-turn/350-item thread read took about 0.135 seconds. Raw session files total about 607 MB, which is why this design never scans them during board rendering.
+
+## Components
+
+### `server/codex-history.mjs`
+
+Share the existing Codex App Server lifecycle between history listing and activity loading. Add the turn-to-segment projection, bounded concurrent reads, and bounded cache while preserving the current `listCodexHistory()` contract.
+
+### `server/app.mjs`
+
+Add `POST /api/local/codex-activity`. Validate a JSON object containing:
+
+```json
+{
+  "threadIds": ["native-thread-id"],
+  "rangeStart": "2026-08-05T16:00:00.000Z",
+  "rangeEnd": "2026-08-06T16:00:00.000Z"
 }
 ```
 
-On mount or manual refresh it calls `listTasks(project.id)` concurrently for each project. It flattens the responses, keeps tasks with `threadId`, associates each task with its project name, and derives clipped bar geometry from `createdAt` and `updatedAt`.
+Accept no more than 512 unique non-empty thread IDs and a positive range no longer than 48 hours. Map App Server failures to `CODEX_ACTIVITY_UNAVAILABLE` without affecting other board routes.
 
-The refresh effect depends on a stable project-ID key rather than the `projects` array identity. Ordinary project-count updates therefore do not trigger extra task fan-out requests; the refresh button remains the explicit synchronization point.
+### `web/src/api.ts` And `web/src/types.ts`
 
-### `App`
+Expose a typed `listCodexActivity()` request returning thread IDs with compact ISO activity segments.
 
-Render the chart after project loading completes, regardless of local AI Chat capability. Pass persisted projects and the existing `openThread` callback. Remove the chart-specific AI Chat open-request state and props because synchronized rows open native Codex conversations, not the local AI Chat panel.
+### `TodayChatGantt`
 
-### `AiChat`
+Load synchronized tasks, call the batch activity API, join results by `threadId`, clip segments, and render multiple `.today-chat-gantt-bar` elements per row. Sort rows by the first visible activity segment. Keep row click behavior unchanged.
 
-Remove the chart-only `AiChatOpenRequest` contract and effect. No local AI Chat behavior is needed for the corrected data path.
+Update visible metrics to `累计活跃` and `最长活跃`; the right column shows each row's visible estimated active duration. The task metadata line includes `估算活跃` and the first visible activity time.
 
-## Time Semantics
+## States
 
-For each synchronized task:
+- **Loading/refreshing:** disable refresh and keep loading local to the Gantt.
+- **Empty:** show no synchronized Codex activity for today when no returned segment intersects the day.
+- **Failure:** show the existing chart-local error/retry state. Project cards remain usable.
+- **Partial source set:** threads not returned by the activity route simply have no row; this is expected for synchronized conversations with no activity today.
 
-- `realStart = Date.parse(task.createdAt)`
-- `realEnd = max(realStart, Date.parse(task.updatedAt))`
-- include when `realStart < dayEnd && realEnd > dayStart`
-- `displayStart = max(realStart, dayStart)`
-- `displayEnd = min(realEnd, dayEnd)`
-- displayed duration is `realEnd - realStart`
+## Non-Goals
 
-Bars crossing midnight are clipped at the chart boundary while the duration label keeps the complete saved elapsed interval. Zero-length or invalid intervals are omitted because they cannot form a visible bar.
-
-## Presentation And States
-
-Keep the existing unframed chart layout and time axis. Rename AI-run-specific text to task-oriented language: `今日 Codex 任务`, count label `任务`, status `Codex 对话`, loading `正在读取今日任务`, and empty state `今天暂无已同步的 Codex 任务`.
-
-One refresh makes one task-list request per persisted project. Requests run concurrently and are made only on first chart mount or explicit refresh. Any request failure produces the existing chart-local failure state without affecting project cards.
+- No SQLite/D1 schema, task mutation, history-import mutation, cloud business contract, raw JSONL scan, or Codex host bridge change.
+- No exact CPU/token billing time claim.
+- No configurable idle threshold, date picker, polling, or background synchronization.
+- No new automated regression tests before the user confirms the direct feature path works.
 
 ## Direct-Path Verification
 
-1. Run `npm run typecheck`.
-2. Run `npm run build`.
-3. Open the project home against the existing local database.
-4. Confirm synchronized tasks with native thread IDs render after first load or manual refresh.
-5. Confirm rows are chronologically ordered and clipped to the local day.
-6. Click a row and confirm the corresponding native Codex conversation opens.
-7. Confirm project cards remain usable and no periodic task requests occur.
-
-This verifies the requested sync-to-refresh-to-chart path. Additional protection remains deferred until the user confirms the corrected behavior.
+1. Query the local activity route with real synchronized IDs and today's range.
+2. Confirm only today's candidate threads are returned and the known long idle gap produces multiple segments.
+3. Load the project home and verify fragmented bars, `累计活跃`, `最长活跃`, and row active durations.
+4. Refresh and confirm unchanged rows reuse cached compressed activity while the UI remains responsive.
+5. Run `npm run typecheck`, `npm run build`, and `git diff --check`.
+6. Create one focused commit containing only the active-fragment request changes.

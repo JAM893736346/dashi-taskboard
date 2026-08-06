@@ -182,6 +182,16 @@ export interface CodexHistoryThread {
   updatedAt: string;
 }
 
+export interface CodexActivitySegment {
+  startAt: string;
+  endAt: string;
+}
+
+export interface CodexThreadActivity {
+  threadId: string;
+  segments: CodexActivitySegment[];
+}
+
 export interface CodexImportTaskInput {
   threadId: string;
   projectId: string;

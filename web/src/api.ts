@@ -8,6 +8,7 @@ import type {
   AiChatThreadSnapshot,
   Attachment,
   Comment,
+  CodexThreadActivity,
   CodexHistoryThread,
   CodexImportResult,
   CodexImportTaskInput,
@@ -96,6 +97,23 @@ export async function listCodexHistory(signal?: AbortSignal): Promise<CodexHisto
   const data = await request<{ threads: CodexHistoryThread[] }>(
     "/api/local/codex-history",
     { signal },
+  );
+  return data.threads;
+}
+
+export async function listCodexActivity(
+  threadIds: string[],
+  rangeStart: string,
+  rangeEnd: string,
+  signal?: AbortSignal,
+): Promise<CodexThreadActivity[]> {
+  const data = await request<{ threads: CodexThreadActivity[] }>(
+    "/api/local/codex-activity",
+    {
+      method: "POST",
+      body: JSON.stringify({ threadIds, rangeStart, rangeEnd }),
+      signal,
+    },
   );
   return data.threads;
 }

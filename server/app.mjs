@@ -18,7 +18,7 @@ import {
 import { normalizeWorkflowSnapshot } from "../shared/workflow-control-flow.mjs";
 import { AiChatService } from "./ai-chat.mjs";
 import { createCloudConfigStore } from "./cloud-config.mjs";
-import { listCodexHistory } from "./codex-history.mjs";
+import { listCodexActivity, listCodexHistory } from "./codex-history.mjs";
 import {
   CloudProxyError,
   createCloudProxy,
@@ -33,6 +33,7 @@ const ATTACHMENT_BODY_LIMIT = 25 * 1024 * 1024;
 const AI_CHAT_TURN_BODY_LIMIT = 25 * 1024 * 1024;
 const AI_CHAT_ATTACHMENT_LIMIT = 10;
 const AI_CHAT_SKILL_MARKER = "\uFFFC";
+const CODEX_ACTIVITY_MAX_RANGE_MS = 48 * 60 * 60 * 1000;
 const INLINE_ATTACHMENT_TYPES = new Set([
   "application/pdf",
   "image/avif",
@@ -284,6 +285,53 @@ function parseDueDate(value, name = "dueDate") {
     throw new ApiError(400, "INVALID_FIELD", `'${name}' must use YYYY-MM-DD`);
   }
   return date;
+}
+
+function parseCodexActivityRequest(value) {
+  assertPlainObject(value);
+  assertAllowedKeys(value, new Set(["threadIds", "rangeStart", "rangeEnd"]));
+  if (!Array.isArray(value.threadIds)) {
+    throw new ApiError(400, "INVALID_FIELD", "'threadIds' must be an array");
+  }
+  if (value.threadIds.length > 512) {
+    throw new ApiError(400, "INVALID_FIELD", "'threadIds' cannot contain more than 512 entries");
+  }
+  const seenThreadIds = new Set();
+  const threadIds = value.threadIds.map((entry, index) => {
+    const threadId = stringField(entry, `threadIds[${index}]`, {
+      required: true,
+      maxLength: 256,
+    });
+    if (seenThreadIds.has(threadId)) {
+      throw new ApiError(400, "INVALID_FIELD", "'threadIds' must contain unique values");
+    }
+    seenThreadIds.add(threadId);
+    return threadId;
+  });
+  const rangeStart = stringField(value.rangeStart, "rangeStart", {
+    required: true,
+    maxLength: 64,
+  });
+  const rangeEnd = stringField(value.rangeEnd, "rangeEnd", {
+    required: true,
+    maxLength: 64,
+  });
+  const rangeStartMs = Date.parse(rangeStart);
+  const rangeEndMs = Date.parse(rangeEnd);
+  if (!Number.isFinite(rangeStartMs) || !Number.isFinite(rangeEndMs)) {
+    throw new ApiError(400, "INVALID_FIELD", "'rangeStart' and 'rangeEnd' must be valid timestamps");
+  }
+  if (rangeEndMs <= rangeStartMs) {
+    throw new ApiError(400, "INVALID_FIELD", "'rangeEnd' must be later than 'rangeStart'");
+  }
+  if (rangeEndMs - rangeStartMs > CODEX_ACTIVITY_MAX_RANGE_MS) {
+    throw new ApiError(400, "INVALID_FIELD", "Codex activity range cannot exceed 48 hours");
+  }
+  return {
+    threadIds,
+    rangeStart: new Date(rangeStartMs).toISOString(),
+    rangeEnd: new Date(rangeEndMs).toISOString(),
+  };
 }
 
 function parseDevelopmentContext(value) {
@@ -1366,6 +1414,7 @@ export function createTaskboardServer(options = {}) {
     manageTaskboardSkillPath: resolved.skillPath,
   });
   const codexHistoryList = options.codexHistoryList ?? listCodexHistory;
+  const codexActivityList = options.codexActivityList ?? listCodexActivity;
   const aiEventResponses = new Set();
 
   const server = createServer(async (request, response) => {
@@ -1500,6 +1549,26 @@ export function createTaskboardServer(options = {}) {
             502,
             "CODEX_HISTORY_UNAVAILABLE",
             error instanceof Error ? error.message : "Unable to read Codex history",
+          );
+        }
+      }
+
+      if (pathname === "/api/local/codex-activity") {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        assertNoQuery(url.searchParams, "POST /api/local/codex-activity");
+        const input = parseCodexActivityRequest(await readJson(request));
+        try {
+          const threads = await codexActivityList({
+            codexExecutable: resolved.codexExecutable,
+            cwd: PROJECT_ROOT,
+            ...input,
+          });
+          return sendJson(response, 200, { threads });
+        } catch (error) {
+          throw new ApiError(
+            502,
+            "CODEX_ACTIVITY_UNAVAILABLE",
+            error instanceof Error ? error.message : "Unable to read Codex activity",
           );
         }
       }
