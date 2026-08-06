@@ -113,14 +113,19 @@ Choose verification by the behavior being changed:
 | React UI or ordinary HTTP behavior | Run `npm run dev`; use the Browser control plugin at `http://127.0.0.1:5173` | UI interaction, API request, data change, visible result with Vite HMR |
 | Built iframe content | Run `npm run build`; inspect `http://127.0.0.1:47823/?host=codex` or the open embedded page | Production bundle and local-service behavior |
 | Manual iframe refresh | Run `npm run codex:refresh -- --port <cdp-port>` | Reload of an already injected Taskboard frame |
+| Renderer injection or injector host runtime | Run `npm run codex:reload`; verify inside the CDP-enabled Codex window | Replacement of the resident injector and iframe refresh without restarting Codex |
 | Sidebar/native route/composer/automation bridge | Keep the launcher running and verify inside the CDP-enabled Codex window | Actual Codex host integration |
 | Cloud business behavior | Run `npm run dev:cloud` against local Wrangler state | Worker route and D1/R2 behavior, not local SQLite |
 
-`npm run build` already calls the injector's `--refresh-if-running` path, so a
-successful build refreshes an open injected iframe when a debuggable Codex
-window is available. The Browser control plugin can verify localhost pages,
-HTTP behavior, state, and visual output, but it cannot by itself prove native
-Codex sidebar or composer integration.
+`npm run build` calls the injector's `--refresh-frame-if-running` path, so a
+successful web build refreshes an open iframe without replacing the resident
+injector; it skips this post-step when no debuggable Codex window is available.
+After changing `inject/codex-taskboard.user.js` or
+`scripts/codex-injector*.mjs`, run `npm run codex:reload` to replace only the
+resident injector and reload the frame. The Codex application stays running.
+The Browser control plugin can verify localhost pages, HTTP behavior, state,
+and visual output, but it cannot by itself prove native Codex sidebar or
+composer integration.
 
 For direct-path verification, demonstrate: entry point -> user or agent action
 -> API/host side effect -> persisted or native state change -> observable UI
