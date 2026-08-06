@@ -13,9 +13,9 @@ Add one device-local quick-validation switch for lower-cost functional checks. K
 1. The user opens board settings and toggles Quick Validation.
 2. The web app reads or patches the device-local automatic-processing settings through the local HTTP API.
 3. The local service persists the `quickMode` boolean in `.data/automatic-processing.json`.
-4. When the dispatcher starts a claimed issue, the runner resolves the effective execution settings.
+4. Before quota lookup and claim creation, the dispatcher resolves the effective execution settings.
 5. Quick mode uses `gpt-5.6-terra` with `low` reasoning. Standard mode uses the saved `executionModel` and `reasoningEffort`.
-6. The automatic-processing status and history continue to show the resulting execution and token usage.
+6. The claim and runner both use that effective pair, so automatic-processing status and history continue to reflect the actual execution.
 
 ## Settings Contract
 
@@ -69,10 +69,10 @@ If settings cannot be loaded, disable the quick-mode switch and use the existing
 Before user confirmation, verify only the requested path:
 
 1. Open board settings and confirm Quick Validation is visually separate from automatic processing and defaults on for a new or pre-field configuration.
-2. Start one eligible automatic issue and confirm the execution request and claim use `gpt-5.6-terra` with `low` reasoning.
-3. Turn quick mode off, select a different standard model and effort, start one eligible issue, and confirm those manual values are used.
-4. Turn quick mode on again and confirm the manual values remain stored while the next execution returns to Terra with low reasoning.
-5. Run the focused typecheck/build checks required by the touched web and server path.
+2. Confirm the shared execution resolver produces `gpt-5.6-terra` with `low` reasoning while the persisted manual values remain unchanged.
+3. Turn quick mode off, select a different standard model and effort, and confirm the resolver returns those manual values.
+4. Turn quick mode on again and confirm the manual values remain stored while the effective pair returns to Terra with low reasoning.
+5. Run the focused typecheck/build checks required by the touched web and server path. Do not start a paid Codex run solely for verification.
 
 ## Non-Goals
 
