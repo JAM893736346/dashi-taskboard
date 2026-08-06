@@ -57,6 +57,7 @@ import { TaskContextMenu } from "./components/TaskContextMenu";
 import { TaskDetail } from "./components/TaskDetail";
 import { TaskEditor } from "./components/TaskEditor";
 import { TaskFilterMenu } from "./components/TaskFilterMenu";
+import { TodayChatGantt } from "./components/TodayChatGantt";
 import { buildIssueUrl, readIssueIdentifier } from "./issueRoute";
 import { DEFAULT_LABELS } from "./labels";
 import {
@@ -2189,6 +2190,9 @@ export function App() {
                 <h2>还没有项目</h2>
                 <p>在 Codex 中创建项目后，再打开任务面板。</p>
               </div>
+            )}
+            {!projectsLoading && (
+              <TodayChatGantt projects={projects} onOpenThread={openThread} />
             )}
           </section>
         ) : detailTask && selectedProject ? (

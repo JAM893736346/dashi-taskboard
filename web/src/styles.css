@@ -711,6 +711,303 @@ kbd {
   font-size: 11px;
 }
 
+.today-chat-gantt {
+  width: min(920px, 100%);
+  min-width: 0;
+  margin: 44px auto 20px;
+  border-top: var(--border-hairline) solid var(--border-strong);
+}
+
+.today-chat-gantt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 20px;
+  padding: 15px 0 13px;
+  border-bottom: var(--border-hairline) solid var(--border);
+}
+
+.today-chat-gantt-heading {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.today-chat-gantt-heading > span {
+  color: var(--text-tertiary);
+  font-size: 9px;
+  font-weight: 550;
+  letter-spacing: 0;
+}
+
+.today-chat-gantt-heading > div {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: 8px;
+}
+
+.today-chat-gantt-heading h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 570;
+  letter-spacing: 0;
+}
+
+.today-chat-gantt-heading time {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.today-chat-gantt-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 14px;
+}
+
+.today-chat-gantt-summary {
+  display: flex;
+  align-items: center;
+  gap: 17px;
+  margin: 0;
+}
+
+.today-chat-gantt-summary > div {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.today-chat-gantt-summary dt {
+  color: var(--text-tertiary);
+  font-size: 9px;
+}
+
+.today-chat-gantt-summary dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 560;
+  font-variant-numeric: tabular-nums;
+}
+
+.today-chat-gantt-refresh {
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: var(--border-hairline) solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+}
+
+.today-chat-gantt-refresh:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.today-chat-gantt-refresh:disabled {
+  cursor: wait;
+  opacity: .7;
+}
+
+.today-chat-gantt-refresh svg {
+  width: 13px;
+  height: 13px;
+}
+
+.today-chat-gantt-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 118px;
+  gap: 7px;
+  border-bottom: var(--border-hairline) solid var(--border);
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+.today-chat-gantt-state.is-error {
+  color: var(--danger);
+}
+
+.today-chat-gantt-state button {
+  padding: 4px 7px;
+  border: var(--border-hairline) solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.today-chat-gantt-state button:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.today-chat-gantt-scroll {
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.today-chat-gantt-chart {
+  min-width: 900px;
+}
+
+.today-chat-gantt-axis,
+.today-chat-gantt-row {
+  display: grid;
+  grid-template-columns: 210px minmax(600px, 1fr) 74px;
+  min-width: 0;
+}
+
+.today-chat-gantt-axis {
+  height: 34px;
+  border-bottom: var(--border-hairline) solid var(--border);
+  color: var(--text-tertiary);
+  font-size: 9px;
+}
+
+.today-chat-gantt-axis > span {
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+}
+
+.today-chat-gantt-axis > span:last-child {
+  justify-content: flex-end;
+}
+
+.today-chat-gantt-ticks,
+.today-chat-gantt-timeline {
+  position: relative;
+  min-width: 0;
+}
+
+.today-chat-gantt-ticks i {
+  position: absolute;
+  bottom: 7px;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  transform: translateX(-50%);
+}
+
+.today-chat-gantt-ticks i:first-child {
+  transform: none;
+}
+
+.today-chat-gantt-ticks i:last-child {
+  transform: translateX(-100%);
+}
+
+.today-chat-gantt-row {
+  align-items: stretch;
+  width: 100%;
+  min-height: 54px;
+  padding: 0;
+  border: 0;
+  border-bottom: var(--border-hairline) solid var(--border);
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.today-chat-gantt-row:hover,
+.today-chat-gantt-row:focus-visible {
+  background: var(--surface-hover);
+  outline: none;
+}
+
+.today-chat-gantt-row:focus-visible {
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+.today-chat-gantt-label {
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+}
+
+.today-chat-gantt-label strong,
+.today-chat-gantt-label small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.today-chat-gantt-label strong {
+  font-size: 11px;
+  font-weight: 550;
+}
+
+.today-chat-gantt-label small {
+  color: var(--text-tertiary);
+  font-size: 9px;
+}
+
+.today-chat-gantt-timeline {
+  overflow: hidden;
+}
+
+.today-chat-gantt-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.today-chat-gantt-grid i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: var(--border-hairline) solid var(--border);
+}
+
+.today-chat-gantt-bar {
+  position: absolute;
+  top: 50%;
+  min-width: 2px;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--accent);
+  transform: translateY(-50%);
+}
+
+.today-chat-gantt-bar.is-running {
+  background: var(--success);
+}
+
+.today-chat-gantt-bar.is-failed {
+  background: var(--danger);
+}
+
+.today-chat-gantt-bar.is-interrupted {
+  background: var(--warning);
+}
+
+.today-chat-gantt-duration {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 10px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .workspace-title,
 .workspace-kicker {
   min-width: 0;
@@ -8578,6 +8875,34 @@ kbd {
 
   .project-history-sync {
     align-self: flex-start;
+  }
+
+  .today-chat-gantt {
+    margin-top: 34px;
+  }
+
+  .today-chat-gantt-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 11px;
+  }
+
+  .today-chat-gantt-actions {
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .today-chat-gantt-summary {
+    gap: 11px;
+  }
+
+  .today-chat-gantt-chart {
+    min-width: 820px;
+  }
+
+  .today-chat-gantt-axis,
+  .today-chat-gantt-row {
+    grid-template-columns: 180px minmax(560px, 1fr) 70px;
   }
 
   .codex-history-dialog {
