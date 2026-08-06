@@ -95,14 +95,20 @@ to `127.0.0.1`, and delegates to the canonical command:
 CODEX_TASKBOARD_HOST=127.0.0.1 npm run codex
 ```
 
+The launcher also starts Codex with
+`--disable-features=LocalNetworkAccessChecks`. This process-local compatibility
+flag allows the `app://-` Codex renderer to embed the loopback Taskboard under
+Chrome 151; it does not change system or Chrome policy.
+
 Keep its Terminal window running; it owns the resident injector and shows
 service/CDP errors. Stop it with `Ctrl-C` when finished. The launcher must not
 silently terminate an existing Codex process.
 
-A Codex window must be launched with its CDP port from the beginning. If Codex
-is already running without CDP, quit it once before using the launcher. After a
-CDP-enabled window and resident injector exist, normal edit/verify cycles do
-not require restarting Codex.
+A Codex window must be launched with its CDP and Taskboard compatibility flags
+from the beginning. After first adopting or changing these launch flags, quit
+Codex once and reopen it through the launcher. Once that window and the resident
+injector exist, `npm run build` refreshes the iframe and `npm run codex:reload`
+replaces injector/runtime code without restarting Codex.
 
 ## Verification Without Restarting Codex
 

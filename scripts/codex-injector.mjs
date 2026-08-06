@@ -200,6 +200,7 @@ function launchCodex(appPath, port) {
       "--args",
       `--remote-debugging-port=${port}`,
       `--remote-allow-origins=http://127.0.0.1:${port}`,
+      "--disable-features=LocalNetworkAccessChecks",
     ],
     { stdio: "ignore" },
   );
