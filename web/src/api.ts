@@ -8,6 +8,9 @@ import type {
   AiChatThreadSnapshot,
   Attachment,
   Comment,
+  CodexHistoryThread,
+  CodexImportResult,
+  CodexImportTaskInput,
   DevelopmentScan,
   IssueRelationType,
   Project,
@@ -87,6 +90,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export async function listProjects(signal?: AbortSignal): Promise<Project[]> {
   const data = await request<{ projects: Project[] }>("/api/projects", { signal });
   return data.projects;
+}
+
+export async function listCodexHistory(signal?: AbortSignal): Promise<CodexHistoryThread[]> {
+  const data = await request<{ threads: CodexHistoryThread[] }>(
+    "/api/local/codex-history",
+    { signal },
+  );
+  return data.threads;
+}
+
+export async function listImportedCodexThreadIds(signal?: AbortSignal): Promise<string[]> {
+  const data = await request<{ threadIds: string[] }>("/api/codex-import", { signal });
+  return data.threadIds;
+}
+
+export async function importCodexHistory(
+  tasks: CodexImportTaskInput[],
+): Promise<CodexImportResult> {
+  return request<CodexImportResult>("/api/codex-import", {
+    method: "POST",
+    body: JSON.stringify({ tasks }),
+  });
 }
 
 export async function getTaskboardMetadata(signal?: AbortSignal): Promise<TaskboardMetadata> {

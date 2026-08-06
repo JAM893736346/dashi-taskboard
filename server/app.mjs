@@ -18,6 +18,7 @@ import {
 import { normalizeWorkflowSnapshot } from "../shared/workflow-control-flow.mjs";
 import { AiChatService } from "./ai-chat.mjs";
 import { createCloudConfigStore } from "./cloud-config.mjs";
+import { listCodexHistory } from "./codex-history.mjs";
 import {
   CloudProxyError,
   createCloudProxy,
@@ -589,6 +590,38 @@ function parseTaskCreate(body) {
     throw new ApiError(400, "INVALID_FIELD", "A recurring issue requires 'dueDate'");
   }
   return task;
+}
+
+function parseCodexImportTimestamp(value, name) {
+  const timestamp = stringField(value, name, { required: true, maxLength: 64 });
+  if (Number.isNaN(Date.parse(timestamp))) {
+    throw new ApiError(400, "INVALID_FIELD", `'${name}' must be a valid timestamp`);
+  }
+  return timestamp;
+}
+
+function parseCodexImportItem(value, index) {
+  assertPlainObject(value);
+  assertAllowedKeys(value, new Set([
+    "threadId", "projectId", "title", "description", "createdAt", "updatedAt",
+  ]));
+  return {
+    threadId: stringField(value.threadId, `tasks[${index}].threadId`, { required: true, maxLength: 256 }),
+    projectId: validateProjectId(value.projectId),
+    title: stringField(value.title, `tasks[${index}].title`, { required: true, maxLength: 240 }),
+    description: stringField(value.description ?? "", `tasks[${index}].description`, { maxLength: 100_000 }),
+    createdAt: parseCodexImportTimestamp(value.createdAt, `tasks[${index}].createdAt`),
+    updatedAt: parseCodexImportTimestamp(value.updatedAt, `tasks[${index}].updatedAt`),
+  };
+}
+
+function parseCodexImportRequest(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["tasks"]));
+  if (!Array.isArray(body.tasks) || body.tasks.length > 10_000) {
+    throw new ApiError(400, "INVALID_FIELD", "'tasks' must be an array with at most 10000 entries");
+  }
+  return body.tasks;
 }
 
 function parseTaskPatch(body) {
@@ -1332,6 +1365,7 @@ export function createTaskboardServer(options = {}) {
     codexStatePath: resolved.codexStatePath,
     manageTaskboardSkillPath: resolved.skillPath,
   });
+  const codexHistoryList = options.codexHistoryList ?? listCodexHistory;
   const aiEventResponses = new Set();
 
   const server = createServer(async (request, response) => {
@@ -1450,6 +1484,24 @@ export function createTaskboardServer(options = {}) {
         assertAllowedQuery(url.searchParams, new Set(["projectId"]), "GET /api/local/ai/catalog");
         const projectId = validateProjectId(url.searchParams.get("projectId") ?? undefined);
         return sendJson(response, 200, await aiChat.getCatalog(projectId));
+      }
+
+      if (pathname === "/api/local/codex-history") {
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        assertNoQuery(url.searchParams, "GET /api/local/codex-history");
+        try {
+          const threads = await codexHistoryList({
+            codexExecutable: resolved.codexExecutable,
+            cwd: PROJECT_ROOT,
+          });
+          return sendJson(response, 200, { threads });
+        } catch (error) {
+          throw new ApiError(
+            502,
+            "CODEX_HISTORY_UNAVAILABLE",
+            error instanceof Error ? error.message : "Unable to read Codex history",
+          );
+        }
       }
 
       if (pathname === "/api/local/ai/threads") {
@@ -1691,6 +1743,43 @@ export function createTaskboardServer(options = {}) {
           });
           events.emit("task.created", { task });
           return sendJson(response, 201, { task });
+        }
+        return methodNotAllowed(response, ["GET", "POST"]);
+      }
+
+      if (pathname === "/api/codex-import") {
+        if ([...url.searchParams.keys()].length > 0) {
+          throw new ApiError(400, "UNKNOWN_QUERY_PARAMETER", "Codex import routes do not accept query parameters");
+        }
+        if (request.method === "GET") {
+          return sendJson(response, 200, { threadIds: database.listTaskThreadIds() });
+        }
+        if (request.method === "POST") {
+          const actor = actorFromRequest(request);
+          const values = parseCodexImportRequest(await readJson(request));
+          const result = { imported: 0, skipped: 0, failed: 0, failures: [] };
+          for (let index = 0; index < values.length; index += 1) {
+            const value = values[index];
+            let threadId = typeof value?.threadId === "string" ? value.threadId : null;
+            try {
+              const input = parseCodexImportItem(value, index);
+              threadId = input.threadId;
+              const outcome = database.importCodexTask({ ...input, actor });
+              if (outcome.status === "skipped") {
+                result.skipped += 1;
+              } else {
+                result.imported += 1;
+                events.emit("task.created", { task: outcome.task });
+              }
+            } catch (error) {
+              result.failed += 1;
+              result.failures.push({
+                threadId,
+                message: error instanceof Error ? error.message : "Import failed",
+              });
+            }
+          }
+          return sendJson(response, 200, result);
         }
         return methodNotAllowed(response, ["GET", "POST"]);
       }

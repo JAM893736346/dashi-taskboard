@@ -206,6 +206,67 @@ test("a failed task insert rolls back its reserved project identifier", async ()
   assert.equal(succeeded.body.task.identifier, "ATOMICCOUNTE-1");
 });
 
+test("Codex history import is idempotent, preserves timestamps, and reports partial failures", async () => {
+  await createProject("codex-import");
+  await cloud.db.exec(
+    "CREATE TRIGGER fail_codex_import BEFORE INSERT ON tasks WHEN NEW.title = 'Fail import' BEGIN SELECT RAISE(ABORT, 'intentional import failure'); END;",
+  );
+  const first = {
+    threadId: "cloud-thread-1",
+    projectId: "codex-import",
+    title: "Cloud history",
+    description: "Original preview",
+    createdAt: "2023-03-04T05:06:07.000Z",
+    updatedAt: "2023-04-05T06:07:08.000Z",
+  };
+  const imported = await cloud.request("/api/codex-import", {
+    method: "POST",
+    actorName: alice,
+    json: {
+      tasks: [
+        first,
+        { ...first, threadId: "cloud-thread-2", title: "Fail import" },
+        { ...first, threadId: "cloud-thread-3", title: "Cloud third" },
+      ],
+    },
+  });
+  assert.equal(imported.response.status, 200);
+  assert.deepEqual(
+    { imported: imported.body.imported, skipped: imported.body.skipped, failed: imported.body.failed },
+    { imported: 2, skipped: 0, failed: 1 },
+  );
+  assert.equal(imported.body.failures[0].threadId, "cloud-thread-2");
+
+  const repeated = await cloud.request("/api/codex-import", {
+    method: "POST",
+    actorName: alice,
+    json: { tasks: [{ ...first, title: "Must not overwrite", description: "Changed" }] },
+  });
+  assert.deepEqual(
+    { imported: repeated.body.imported, skipped: repeated.body.skipped, failed: repeated.body.failed },
+    { imported: 0, skipped: 1, failed: 0 },
+  );
+
+  const listed = await cloud.request("/api/tasks?projectId=codex-import&archived=false", {
+    actorName: alice,
+  });
+  assert.deepEqual(listed.body.tasks.map((task) => task.identifier), ["CODEXIMPORT-1", "CODEXIMPORT-2"]);
+  assert.equal(listed.body.tasks[0].title, "Cloud history");
+  assert.equal(listed.body.tasks[0].description, "Original preview");
+  assert.equal(listed.body.tasks[0].threadId, first.threadId);
+  assert.equal(listed.body.tasks[0].createdAt, first.createdAt);
+  assert.equal(listed.body.tasks[0].updatedAt, first.updatedAt);
+
+  const projectCounter = await cloud.db.prepare(
+    "SELECT next_task_number FROM projects WHERE id = 'codex-import'",
+  ).first("next_task_number");
+  assert.equal(projectCounter, 3);
+  const ids = await cloud.request("/api/codex-import", { actorName: alice });
+  assert.ok(ids.body.threadIds.includes("cloud-thread-1"));
+  assert.ok(ids.body.threadIds.includes("cloud-thread-3"));
+  assert.ok(!ids.body.threadIds.includes("cloud-thread-2"));
+});
+
 test("archived tasks are excluded from project issue counts", async () => {
   const project = await createProject("archive-count");
   assert.equal(project.response.status, 201);

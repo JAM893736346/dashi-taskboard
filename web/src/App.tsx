@@ -45,6 +45,7 @@ import {
 import { BoardColumn, STATUS_DETAILS } from "./components/BoardColumn";
 import { AiChat } from "./components/AiChat";
 import { BoardSettingsMenu } from "./components/BoardSettingsMenu";
+import { CodexHistorySyncDialog } from "./components/CodexHistorySyncDialog";
 import { HiddenColumns } from "./components/HiddenColumns";
 import {
   resolveInlineMediaMarkdown,
@@ -554,6 +555,7 @@ export function App() {
   const [columnVisibilityByProject, setColumnVisibilityByProject] = useState(readColumnVisibilityByProject);
   const [boardView, setBoardView] = useState<BoardView>("issues");
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [codexHistorySyncOpen, setCodexHistorySyncOpen] = useState(false);
   const [detailTaskIdentifier, setDetailTaskIdentifier] = useState<string | null>(
     () => readIssueIdentifier(window.location.search),
   );
@@ -703,6 +705,13 @@ export function App() {
   const projectsWithoutIssues = useMemo(
     () => projectChoices.filter((project) => project.issueCount === 0),
     [projectChoices],
+  );
+  const codexImportProjects = useMemo(
+    () => projects.map((project) => ({
+      ...project,
+      workspacePath: deviceWorkspacePaths[project.id] ?? project.workspacePath,
+    })),
+    [deviceWorkspacePaths, projects],
   );
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
@@ -2096,9 +2105,20 @@ export function App() {
         {!selectedProjectId ? (
           <section className="project-home">
             <div className="project-home-heading">
-              <span>任务面板</span>
-              <h1>选择项目</h1>
-              <p>从 Codex 项目开始，或继续使用之前保存的项目。</p>
+              <div>
+                <span>任务面板</span>
+                <h1>选择项目</h1>
+                <p>从 Codex 项目开始，或继续使用之前保存的项目。</p>
+              </div>
+              <button
+                type="button"
+                className="button secondary project-history-sync"
+                disabled={projects.length === 0}
+                onClick={() => setCodexHistorySyncOpen(true)}
+              >
+                <LinearIcon name="terminal" />
+                同步 Codex 历史
+              </button>
             </div>
             {projectsLoading ? (
               <div className="project-grid project-grid-loading" aria-label="正在加载项目" aria-busy="true">
@@ -2298,6 +2318,19 @@ export function App() {
           developmentScanLoading={developmentScanLoading}
           onCancel={() => setEditor(null)}
           onSave={saveEditor}
+        />
+      )}
+
+      {codexHistorySyncOpen && (
+        <CodexHistorySyncDialog
+          projects={codexImportProjects}
+          onClose={() => setCodexHistorySyncOpen(false)}
+          onImported={async () => {
+            await refreshProjectList();
+            if (selectedProjectIdRef.current) {
+              await refreshTasks(selectedProjectIdRef.current, { quiet: true });
+            }
+          }}
         />
       )}
 

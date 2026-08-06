@@ -173,6 +173,36 @@ export interface Project {
   updatedAt: string;
 }
 
+export interface CodexHistoryThread {
+  threadId: string;
+  title: string;
+  description: string;
+  cwd: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CodexImportTaskInput {
+  threadId: string;
+  projectId: string;
+  title: string;
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CodexImportFailure {
+  threadId: string | null;
+  message: string;
+}
+
+export interface CodexImportResult {
+  imported: number;
+  skipped: number;
+  failed: number;
+  failures: CodexImportFailure[];
+}
+
 export interface TaskRelationSummary {
   id: string;
   identifier: string;

@@ -948,6 +948,15 @@ export class TaskboardDatabase {
     return this.database.prepare(sql).all(...values).map((row) => this.#taskWithRelations(row));
   }
 
+  listTaskThreadIds() {
+    return this.database.prepare(`
+      SELECT DISTINCT thread_id
+      FROM tasks
+      WHERE thread_id IS NOT NULL AND thread_id != ''
+      ORDER BY thread_id
+    `).all().map((row) => row.thread_id);
+  }
+
   getTask(id) {
     const row = this.database.prepare("SELECT * FROM tasks WHERE id = ? OR identifier = ?").get(id, id);
     return row ? this.#taskWithRelations(row) : null;
@@ -1020,6 +1029,81 @@ export class TaskboardDatabase {
       );
       this.database.exec("COMMIT");
       return this.getTask(id);
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  importCodexTask(input) {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.database.prepare(`
+        SELECT id FROM tasks WHERE thread_id = ? LIMIT 1
+      `).get(input.threadId);
+      if (existing) {
+        this.database.exec("COMMIT");
+        return { status: "skipped", task: this.getTask(existing.id) };
+      }
+
+      const project = this.database.prepare(`
+        SELECT id, next_task_number FROM projects WHERE id = ?
+      `).get(input.projectId);
+      if (!project) {
+        throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${input.projectId}' does not exist`);
+      }
+
+      const id = randomUUID();
+      const identifier = `${projectPrefix(project.id)}-${project.next_task_number}`;
+      const sortOrder = this.database.prepare(`
+        SELECT COALESCE(MAX(sort_order), 0) + 1000 AS next_sort_order
+        FROM tasks
+        WHERE project_id = ? AND status = 'backlog' AND archived_at IS NULL
+      `).get(input.projectId).next_sort_order;
+      const projectUpdatedAt = now();
+
+      this.database.prepare(`
+        INSERT INTO tasks (
+          id, identifier, project_id, title, description, status, priority, labels,
+          sort_order, thread_id, creator_type, creator_id, creator_name, creator_avatar_url,
+          assignee_type, assignee_id, assignee_name, assignee_avatar_url,
+          workflow_id, git_branch, worktree_path, worktree_branch,
+          due_date, recurrence_interval, recurrence_unit,
+          archived_at, version, created_at, updated_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, 'backlog', 'none', '[]',
+          ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?,
+          NULL, NULL, NULL, NULL,
+          NULL, NULL, NULL,
+          NULL, 1, ?, ?
+        )
+      `).run(
+        id,
+        identifier,
+        input.projectId,
+        input.title,
+        input.description,
+        sortOrder,
+        input.threadId,
+        input.actor.type,
+        input.actor.id,
+        input.actor.name,
+        input.actor.avatarUrl,
+        input.actor.type,
+        input.actor.id,
+        input.actor.name,
+        input.actor.avatarUrl,
+        input.createdAt,
+        input.updatedAt,
+      );
+      this.database.prepare(`
+        UPDATE projects
+        SET next_task_number = next_task_number + 1, updated_at = ?
+        WHERE id = ?
+      `).run(projectUpdatedAt, input.projectId);
+      this.database.exec("COMMIT");
+      return { status: "imported", task: this.getTask(id) };
     } catch (error) {
       this.database.exec("ROLLBACK");
       throw error;

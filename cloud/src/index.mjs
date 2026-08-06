@@ -743,6 +743,55 @@ function parseTaskCreate(body) {
   return input;
 }
 
+function parseCodexImportTimestamp(value, name) {
+  const timestamp = stringField(value, name, { required: true, maxLength: 64 });
+  if (Number.isNaN(Date.parse(timestamp))) {
+    throw new ApiError(400, "INVALID_FIELD", `'${name}' must be a valid timestamp`);
+  }
+  return timestamp;
+}
+
+function parseCodexImportItem(value, index) {
+  assertPlainObject(value);
+  assertAllowedKeys(value, new Set([
+    "threadId",
+    "projectId",
+    "title",
+    "description",
+    "createdAt",
+    "updatedAt",
+  ]));
+  return {
+    threadId: stringField(value.threadId, `tasks[${index}].threadId`, {
+      required: true,
+      maxLength: 256,
+    }),
+    projectId: validateProjectId(value.projectId),
+    title: stringField(value.title, `tasks[${index}].title`, {
+      required: true,
+      maxLength: 240,
+    }),
+    description: stringField(value.description ?? "", `tasks[${index}].description`, {
+      maxLength: 100_000,
+    }),
+    createdAt: parseCodexImportTimestamp(value.createdAt, `tasks[${index}].createdAt`),
+    updatedAt: parseCodexImportTimestamp(value.updatedAt, `tasks[${index}].updatedAt`),
+  };
+}
+
+function parseCodexImportRequest(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["tasks"]));
+  if (!Array.isArray(body.tasks) || body.tasks.length > 10_000) {
+    throw new ApiError(
+      400,
+      "INVALID_FIELD",
+      "'tasks' must be an array with at most 10000 entries",
+    );
+  }
+  return body.tasks;
+}
+
 function parseTaskPatch(body) {
   assertPlainObject(body);
   assertAllowedKeys(body, new Set([
@@ -1076,6 +1125,16 @@ async function listTasks(env, filters) {
   return Promise.all(rows.map((row) => hydrateTask(env, row)));
 }
 
+async function listTaskThreadIds(env) {
+  const rows = await all(env.DB.prepare(`
+    SELECT DISTINCT thread_id
+    FROM tasks
+    WHERE thread_id IS NOT NULL AND thread_id != ''
+    ORDER BY thread_id
+  `));
+  return rows.map((row) => row.thread_id);
+}
+
 async function createTask(env, input, actor) {
   await requireProject(env, input.projectId);
   let sortOrder = input.sortOrder;
@@ -1151,6 +1210,78 @@ async function createTask(env, input, actor) {
     );
   }
   return getTask(env, id);
+}
+
+async function importCodexTask(env, input, actor) {
+  const id = uuid();
+  const projectUpdatedAt = now();
+  const results = await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO tasks (
+        id, identifier, project_id, title, description, status, priority, labels,
+        sort_order, thread_id, creator_type, creator_id, creator_name, creator_avatar_url,
+        assignee_type, assignee_id, assignee_name, assignee_avatar_url,
+        workflow_id, development_context_type, development_branch,
+        due_date, recurrence_interval, recurrence_unit,
+        archived_at, version, created_at, updated_at
+      )
+      SELECT
+        ?,
+        ? || '-' || CAST(projects.next_task_number AS TEXT),
+        projects.id,
+        ?, ?, 'backlog', 'none', '[]',
+        (
+          SELECT COALESCE(MAX(sort_order), 0) + 1000
+          FROM tasks
+          WHERE project_id = projects.id AND status = 'backlog' AND archived_at IS NULL
+        ),
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        NULL, NULL, NULL,
+        NULL, NULL, NULL,
+        NULL, 1, ?, ?
+      FROM projects
+      WHERE projects.id = ?
+        AND NOT EXISTS (SELECT 1 FROM tasks WHERE thread_id = ?)
+    `).bind(
+      id,
+      projectPrefix(input.projectId),
+      input.title,
+      input.description,
+      input.threadId,
+      actor.type,
+      actor.id,
+      actor.name,
+      actor.avatarUrl,
+      actor.type,
+      actor.id,
+      actor.name,
+      actor.avatarUrl,
+      input.createdAt,
+      input.updatedAt,
+      input.projectId,
+      input.threadId,
+    ),
+    env.DB.prepare(`
+      UPDATE projects
+      SET next_task_number = next_task_number + 1, updated_at = ?
+      WHERE id = ? AND EXISTS (SELECT 1 FROM tasks WHERE tasks.id = ?)
+    `).bind(projectUpdatedAt, input.projectId, id),
+  ]);
+
+  if (changed(results[0])) {
+    if (!changed(results[1])) {
+      throw new Error("Codex import inserted a task without advancing its project counter");
+    }
+    return { status: "imported", task: await getTask(env, id) };
+  }
+
+  const existing = await env.DB.prepare(
+    "SELECT id FROM tasks WHERE thread_id = ? LIMIT 1",
+  ).bind(input.threadId).first();
+  if (existing) return { status: "skipped" };
+  await requireProject(env, input.projectId);
+  throw new Error("Codex import did not create a task");
 }
 
 async function updateTask(env, id, input, actor) {
@@ -1973,6 +2104,36 @@ async function routeApi(request, env, actor, url) {
       return json(201, {
         task: await createTask(env, parseTaskCreate(await readJson(request)), actor),
       });
+    }
+    methodNotAllowed(["GET", "POST"]);
+  }
+
+  if (pathname === "/api/codex-import") {
+    requireNoQuery(url, "Codex import routes");
+    if (request.method === "GET") {
+      return json(200, { threadIds: await listTaskThreadIds(env) });
+    }
+    if (request.method === "POST") {
+      const values = parseCodexImportRequest(await readJson(request));
+      const result = { imported: 0, skipped: 0, failed: 0, failures: [] };
+      for (let index = 0; index < values.length; index += 1) {
+        const value = values[index];
+        let threadId = typeof value?.threadId === "string" ? value.threadId : null;
+        try {
+          const input = parseCodexImportItem(value, index);
+          threadId = input.threadId;
+          const outcome = await importCodexTask(env, input, actor);
+          if (outcome.status === "skipped") result.skipped += 1;
+          else result.imported += 1;
+        } catch (error) {
+          result.failed += 1;
+          result.failures.push({
+            threadId,
+            message: error instanceof Error ? error.message : "Import failed",
+          });
+        }
+      }
+      return json(200, result);
     }
     methodNotAllowed(["GET", "POST"]);
   }
