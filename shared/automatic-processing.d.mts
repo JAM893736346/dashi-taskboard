@@ -18,6 +18,7 @@ export type AutomationClaimStatus =
 export interface AutomaticProcessingSettings {
   version: 1;
   enabled: boolean;
+  quickMode: boolean;
   projectMode: AutomaticProcessingProjectMode;
   projectIds: string[];
   claimStrategy: AutomaticProcessingClaimStrategy;
@@ -56,7 +57,17 @@ export interface AutomaticProcessingTask {
 }
 
 export const DEFAULT_AUTOMATIC_PROCESSING_SETTINGS: Readonly<AutomaticProcessingSettings>;
+export const QUICK_VALIDATION_EXECUTION_SETTINGS: Readonly<{
+  executionModel: string;
+  reasoningEffort: string;
+}>;
 export function normalizeAutomaticProcessingSettings(value: unknown): AutomaticProcessingSettings;
+export function resolveAutomaticProcessingExecutionSettings(
+  settings: AutomaticProcessingSettings,
+): {
+  executionModel: string;
+  reasoningEffort: string;
+};
 export function mappedAutomaticProcessingProjectIds(
   projects: AutomaticProcessingProject[],
   settings: AutomaticProcessingSettings,

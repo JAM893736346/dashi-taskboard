@@ -282,6 +282,16 @@ export async function updateAutomaticProcessingSettings(
   return data.settings;
 }
 
+export async function updateAutomaticProcessingQuickMode(
+  quickMode: boolean,
+): Promise<AutomaticProcessingSettings> {
+  const data = await request<{ settings: AutomaticProcessingSettings }>(
+    "/api/local/automatic-processing/settings",
+    { method: "PATCH", body: JSON.stringify({ quickMode }) },
+  );
+  return data.settings;
+}
+
 export async function getAutomaticProcessingStatus(
   signal?: AbortSignal,
 ): Promise<AutomaticProcessingStatus> {

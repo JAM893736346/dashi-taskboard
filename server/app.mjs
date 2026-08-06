@@ -1542,6 +1542,21 @@ export function createTaskboardServer(options = {}) {
         if (request.method === "GET") {
           return sendJson(response, 200, { settings: dispatcher.getSettings() });
         }
+        if (request.method === "PATCH") {
+          const body = await readJson(request);
+          assertPlainObject(body);
+          assertAllowedKeys(body, new Set(["quickMode"]));
+          if (typeof body.quickMode !== "boolean") {
+            throw new ApiError(400, "INVALID_FIELD", "'quickMode' must be a boolean");
+          }
+          const settings = normalizeAutomaticProcessingSettings({
+            ...dispatcher.getSettings(),
+            quickMode: body.quickMode,
+          });
+          return sendJson(response, 200, {
+            settings: await dispatcher.updateSettings(settings),
+          });
+        }
         if (request.method === "PUT") {
           let settings;
           try {
@@ -1557,7 +1572,7 @@ export function createTaskboardServer(options = {}) {
             settings: await dispatcher.updateSettings(settings),
           });
         }
-        return methodNotAllowed(response, ["GET", "PUT"]);
+        return methodNotAllowed(response, ["GET", "PUT", "PATCH"]);
       }
 
       if (pathname === "/api/local/automatic-processing/status") {

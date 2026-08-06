@@ -1629,6 +1629,7 @@ export function App() {
               onChange={setFilters}
             />
             <BoardSettingsMenu
+              available={taskboardMetadata?.localCapabilities?.available !== false}
               showEmptyColumns={showEmptyColumns}
               onShowEmptyColumnsChange={updateShowEmptyColumns}
             />

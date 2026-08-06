@@ -378,6 +378,7 @@ export function AutomaticProcessingMenu({
               <span>执行模型</span>
               <select
                 value={draft.executionModel}
+                disabled={draft.quickMode || saving}
                 onChange={(event) => {
                   const model = event.target.value as AutomationModel;
                   const next = withAutomationModel({
@@ -394,6 +395,7 @@ export function AutomaticProcessingMenu({
               <span>推理强度</span>
               <select
                 value={draft.reasoningEffort}
+                disabled={draft.quickMode || saving}
                 onChange={(event) => setDraft({ ...draft, reasoningEffort: event.target.value as AutomationReasoningEffort })}
               >
                 {getAutomationModel(draft.executionModel).efforts.map((effort) => (

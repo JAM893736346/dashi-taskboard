@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 
-import { rankAutomaticProcessingCandidates } from "../shared/automatic-processing.mjs";
+import {
+  rankAutomaticProcessingCandidates,
+  resolveAutomaticProcessingExecutionSettings,
+} from "../shared/automatic-processing.mjs";
 
 const ACTIVE_STATUSES = new Set(["claimed", "running", "retry_wait"]);
 
@@ -80,6 +83,8 @@ export class AutomaticProcessingDispatcher {
   async updateSettings(value) {
     this.settings = await this.configStore.write(value);
     this.lastError = null;
+    this.quota = null;
+    this.quotaCheckedAt = 0;
     this.#scheduleFallback();
     if (this.started) await this.reconcile("settings");
     return this.settings;
@@ -175,13 +180,13 @@ export class AutomaticProcessingDispatcher {
     this.fallbackTimer.unref();
   }
 
-  async #readQuota() {
+  async #readQuota(executionModel) {
     if (!this.settings.quotaAware) {
       this.quota = null;
       return true;
     }
     if (Date.now() - this.quotaCheckedAt >= 60_000 || !this.quota) {
-      this.quota = await this.quotaReader(this.settings.executionModel, {
+      this.quota = await this.quotaReader(executionModel, {
         codexExecutable: this.codexExecutable,
       });
       this.quotaCheckedAt = Date.now();
@@ -194,7 +199,8 @@ export class AutomaticProcessingDispatcher {
     this.lastCandidateCount = 0;
     this.pauseReason = null;
     if (!this.settings?.enabled) return;
-    if (!(await this.#readQuota())) {
+    const executionSettings = resolveAutomaticProcessingExecutionSettings(this.settings);
+    if (!(await this.#readQuota(executionSettings.executionModel))) {
       this.pauseReason = "quota";
       return;
     }
@@ -246,10 +252,10 @@ export class AutomaticProcessingDispatcher {
       if (candidates.length === 0) break;
       const acquired = await this.businessStore.acquire({
         candidateIds: candidates.map((task) => task.id),
-        settings: this.settings,
+        settings: { ...this.settings, ...executionSettings },
         dispatcherId: this.dispatcherId,
-        model: this.settings.executionModel,
-        reasoningEffort: this.settings.reasoningEffort,
+        model: executionSettings.executionModel,
+        reasoningEffort: executionSettings.reasoningEffort,
         leaseMs: this.leaseMs,
         dayStart: today,
       });

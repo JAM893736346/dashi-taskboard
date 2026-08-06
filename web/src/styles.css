@@ -1754,6 +1754,7 @@ kbd {
   font-size: 12px;
 }
 
+.automatic-processing-field select:disabled,
 .automatic-processing-field input:disabled {
   color: var(--text-tertiary);
   opacity: 0.62;

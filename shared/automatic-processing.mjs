@@ -8,6 +8,7 @@ import { isTaskPriority } from "./domain.mjs";
 const SETTING_KEYS = new Set([
   "version",
   "enabled",
+  "quickMode",
   "projectMode",
   "projectIds",
   "claimStrategy",
@@ -38,6 +39,7 @@ const PRIORITY_RANK = new Map([
 export const DEFAULT_AUTOMATIC_PROCESSING_SETTINGS = Object.freeze({
   version: 1,
   enabled: false,
+  quickMode: true,
   projectMode: "selected",
   projectIds: [],
   claimStrategy: "board-order",
@@ -54,6 +56,20 @@ export const DEFAULT_AUTOMATIC_PROCESSING_SETTINGS = Object.freeze({
   maxRetries: 1,
   retryDelayMinutes: 15,
 });
+
+export const QUICK_VALIDATION_EXECUTION_SETTINGS = Object.freeze({
+  executionModel: "gpt-5.6-terra",
+  reasoningEffort: "low",
+});
+
+export function resolveAutomaticProcessingExecutionSettings(settings) {
+  return settings.quickMode
+    ? QUICK_VALIDATION_EXECUTION_SETTINGS
+    : {
+        executionModel: settings.executionModel,
+        reasoningEffort: settings.reasoningEffort,
+      };
+}
 
 function fail(message) {
   throw new TypeError(message);
@@ -90,6 +106,8 @@ export function normalizeAutomaticProcessingSettings(value) {
   if (unknown.length > 0) fail(`Unknown automatic processing setting: ${unknown[0]}`);
   if (value.version !== 1) fail("'version' must be 1");
   if (typeof value.enabled !== "boolean") fail("'enabled' must be a boolean");
+  const quickMode = value.quickMode ?? true;
+  if (typeof quickMode !== "boolean") fail("'quickMode' must be a boolean");
   if (!PROJECT_MODES.has(value.projectMode)) fail("'projectMode' must be all or selected");
   if (!CLAIM_STRATEGIES.has(value.claimStrategy)) {
     fail("'claimStrategy' must be board-order, priority-first, or due-date-first");
@@ -114,6 +132,7 @@ export function normalizeAutomaticProcessingSettings(value) {
   return {
     version: 1,
     enabled: value.enabled,
+    quickMode,
     projectMode: value.projectMode,
     projectIds: stringList(value.projectIds, "projectIds", { maxItems: 200, maxLength: 128 }),
     claimStrategy: value.claimStrategy,

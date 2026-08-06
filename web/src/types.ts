@@ -78,6 +78,7 @@ export type AutomationClaimStatus =
 export interface AutomaticProcessingSettings {
   version: 1;
   enabled: boolean;
+  quickMode: boolean;
   projectMode: AutomaticProcessingProjectMode;
   projectIds: string[];
   claimStrategy: AutomaticProcessingClaimStrategy;

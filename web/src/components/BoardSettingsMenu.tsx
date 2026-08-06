@@ -1,13 +1,19 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import {
+  getAutomaticProcessingSettings,
+  updateAutomaticProcessingQuickMode,
+} from "../api";
 import { LinearIcon } from "./LinearIcon";
 
 interface BoardSettingsMenuProps {
+  available: boolean;
   showEmptyColumns: boolean;
   onShowEmptyColumnsChange: (show: boolean) => void;
 }
 
 export function BoardSettingsMenu({
+  available,
   showEmptyColumns,
   onShowEmptyColumnsChange,
 }: BoardSettingsMenuProps) {
@@ -15,6 +21,44 @@ export function BoardSettingsMenu({
   const menuRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 0, top: 0, ready: false });
+  const [quickMode, setQuickMode] = useState<boolean | null>(null);
+  const [quickModeLoading, setQuickModeLoading] = useState(false);
+  const [quickModeSaving, setQuickModeSaving] = useState(false);
+  const [quickModeError, setQuickModeError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open || !available) return;
+    const controller = new AbortController();
+    setQuickModeLoading(true);
+    setQuickModeError(null);
+    void getAutomaticProcessingSettings(controller.signal)
+      .then((settings) => setQuickMode(settings.quickMode))
+      .catch((error: unknown) => {
+        if ((error as Error).name !== "AbortError") {
+          setQuickModeError(error instanceof Error ? error.message : "无法读取快速模式");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setQuickModeLoading(false);
+      });
+    return () => controller.abort();
+  }, [available, open]);
+
+  async function saveQuickMode(next: boolean) {
+    const previous = quickMode ?? true;
+    setQuickMode(next);
+    setQuickModeSaving(true);
+    setQuickModeError(null);
+    try {
+      const settings = await updateAutomaticProcessingQuickMode(next);
+      setQuickMode(settings.quickMode);
+    } catch (error) {
+      setQuickMode(previous);
+      setQuickModeError(error instanceof Error ? error.message : "无法保存快速模式");
+    } finally {
+      setQuickModeSaving(false);
+    }
+  }
 
   useLayoutEffect(() => {
     if (!open || !triggerRef.current || !menuRef.current) return;
@@ -102,6 +146,28 @@ export function BoardSettingsMenu({
             <span className="sr-only">{showEmptyColumns ? "关闭显示空列" : "开启显示空列"}</span>
           </button>
         </div>
+      </section>
+      <section className="board-settings-section" aria-labelledby="validation-options-heading">
+        <h2 id="validation-options-heading">验证</h2>
+        <div className="board-setting-row">
+          <span className="board-setting-copy">
+            <span>快速模式</span>
+            <small>5.6 Terra · 低</small>
+          </span>
+          <button
+            type="button"
+            className={`board-setting-switch${(quickMode ?? true) ? " is-on" : ""}`}
+            role="switch"
+            aria-checked={quickMode ?? true}
+            aria-label="快速模式"
+            disabled={!available || quickModeLoading || quickModeSaving}
+            onClick={() => void saveQuickMode(!(quickMode ?? true))}
+          >
+            <span aria-hidden="true" />
+            <span className="sr-only">{(quickMode ?? true) ? "关闭快速模式" : "开启快速模式"}</span>
+          </button>
+        </div>
+        {quickModeError && <p className="board-setting-error" role="alert">{quickModeError}</p>}
       </section>
     </div>,
     document.body,

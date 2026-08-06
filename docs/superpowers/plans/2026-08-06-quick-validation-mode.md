@@ -30,7 +30,7 @@
 - Modify: `shared/automatic-processing.d.mts:18-60`
 - Modify: `web/src/types.ts:78-96`
 
-- [ ] **Step 1: Add the defaulted persisted field**
+- [x] **Step 1: Add the defaulted persisted field**
 
 Add `"quickMode"` to `SETTING_KEYS`, set `quickMode: true` in `DEFAULT_AUTOMATIC_PROCESSING_SETTINGS`, and normalize missing version-1 values as enabled:
 
@@ -47,7 +47,7 @@ return {
 
 Insert `quickMode` into the actual full return object without removing or reordering the remaining normalized fields.
 
-- [ ] **Step 2: Add one effective execution-setting resolver**
+- [x] **Step 2: Add one effective execution-setting resolver**
 
 Export the preset and resolver from `shared/automatic-processing.mjs`:
 
@@ -67,11 +67,11 @@ export function resolveAutomaticProcessingExecutionSettings(settings) {
 }
 ```
 
-- [ ] **Step 3: Keep TypeScript declarations aligned**
+- [x] **Step 3: Keep TypeScript declarations aligned**
 
 Add `quickMode: boolean` to both `AutomaticProcessingSettings` interfaces. Declare the constant and resolver in `shared/automatic-processing.d.mts` with `executionModel` and `reasoningEffort` string fields.
 
-- [ ] **Step 4: Verify defaults and reversible resolution**
+- [x] **Step 4: Verify defaults and reversible resolution**
 
 Run:
 
@@ -90,7 +90,7 @@ true { executionModel: 'gpt-5.6-terra', reasoningEffort: 'low' } { executionMode
 **Files:**
 - Modify: `server/automatic-processing.mjs:3-4,178-255`
 
-- [ ] **Step 1: Resolve the model before quota lookup**
+- [x] **Step 1: Resolve the model before quota lookup**
 
 Import `resolveAutomaticProcessingExecutionSettings`. Change `#readQuota` to accept `executionModel`, and pass that model to `quotaReader`:
 
@@ -110,7 +110,7 @@ async #readQuota(executionModel) {
 }
 ```
 
-- [ ] **Step 2: Use the same pair for local and cloud claim acquisition**
+- [x] **Step 2: Use the same pair for local and cloud claim acquisition**
 
 At the beginning of enabled reconciliation, derive:
 
@@ -134,7 +134,7 @@ Do not change `#launch`: its existing claim-derived `runSettings` guarantees ret
 - Modify: `server/app.mjs:1540-1561`
 - Modify: `web/src/api.ts:265-284`
 
-- [ ] **Step 1: Accept only `quickMode` in the PATCH request**
+- [x] **Step 1: Accept only `quickMode` in the PATCH request**
 
 Add a PATCH branch beside GET and PUT:
 
@@ -158,7 +158,7 @@ if (request.method === "PATCH") {
 
 Update the method allowlist to `GET`, `PUT`, and `PATCH`.
 
-- [ ] **Step 2: Add the browser API helper**
+- [x] **Step 2: Add the browser API helper**
 
 Export:
 
@@ -182,7 +182,7 @@ export async function updateAutomaticProcessingQuickMode(
 - Modify: `web/src/App.tsx:1631-1634`
 - Modify: `web/src/styles.css:1742-1760`
 
-- [ ] **Step 1: Load and save quick mode inside Board Settings**
+- [x] **Step 1: Load and save quick mode inside Board Settings**
 
 Import `getAutomaticProcessingSettings` and `updateAutomaticProcessingQuickMode`. Add an `available: boolean` prop plus `quickMode`, loading, saving, and error state. Whenever the menu opens, load current settings with an `AbortController` and set `quickMode` from the response.
 
@@ -206,7 +206,7 @@ async function saveQuickMode(next: boolean) {
 }
 ```
 
-- [ ] **Step 2: Render a separate validation section**
+- [x] **Step 2: Render a separate validation section**
 
 After the existing `看板选项` section, render:
 
@@ -235,7 +235,7 @@ After the existing `看板选项` section, render:
 </section>
 ```
 
-- [ ] **Step 3: Pass local capability and prevent misleading standard edits**
+- [x] **Step 3: Pass local capability and prevent misleading standard edits**
 
 Pass `available={taskboardMetadata?.localCapabilities?.available !== false}` from `App.tsx`. Add `disabled={draft.quickMode || saving}` to the model and reasoning selects in `AutomaticProcessingMenu`.
 
@@ -249,7 +249,7 @@ Extend the existing disabled control rule to include selects:
 }
 ```
 
-- [ ] **Step 4: Compile the touched frontend contract**
+- [x] **Step 4: Compile the touched frontend contract**
 
 Run `npm run typecheck`.
 
@@ -260,29 +260,29 @@ Expected: exit code 0 with no TypeScript errors.
 **Files:**
 - Verify only; no new test files.
 
-- [ ] **Step 1: Build production web assets**
+- [x] **Step 1: Build production web assets**
 
 Run `npm run build`.
 
 Expected: Vite completes successfully and the optional Codex frame refresh either succeeds or reports that no debuggable window is available.
 
-- [ ] **Step 2: Start the development app and inspect the UI**
+- [x] **Step 2: Start the development app and inspect the UI**
 
 Run `npm run dev`, use the in-app browser at `http://127.0.0.1:5173`, select a project, and open Board Settings.
 
 Confirm the `验证` section and Quick Mode switch are separate from the automatic-processing control, fit at desktop and mobile widths, and default to on when the persisted field was absent.
 
-- [ ] **Step 3: Demonstrate persistence and reversibility**
+- [x] **Step 3: Demonstrate persistence and reversibility**
 
 Record the current quick-mode value. Toggle it off in Board Settings, reopen the menu, and confirm it remains off. Open automatic-processing settings and confirm the standard model/effort selectors are enabled. Toggle Quick Mode back on, reopen both menus, and confirm the switch remains on while standard selectors are disabled.
 
 Restore the user's original quick-mode value if verification changed it.
 
-- [ ] **Step 4: Confirm effective settings without starting a paid Codex run**
+- [x] **Step 4: Confirm effective settings without starting a paid Codex run**
 
 Run the shared resolver command from Task 1 and inspect the automatic-processing settings endpoint after each UI toggle. This proves the persisted setting and the exact effective Terra/low versus manual pair without creating or mutating a real issue merely for verification.
 
-- [ ] **Step 5: Review and commit only feature files**
+- [x] **Step 5: Review and commit only feature files**
 
 Run:
 
