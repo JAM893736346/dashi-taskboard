@@ -26,7 +26,14 @@ import type {
   TaskboardMetadata,
   TaskDraft,
   TaskStatus,
+  IssueWorkflowSnapshot,
+  WorkflowAmendmentInput,
   WorkflowCapabilities,
+  WorkflowInboxMessage,
+  WorkflowNodeControlAction,
+  WorkflowRevision,
+  WorkflowRunAmendment,
+  WorkflowRunSnapshot,
   WorkflowWorkspaceRecord,
 } from "./types";
 
@@ -438,6 +445,102 @@ export async function saveWorkflowWorkspace<T>(
     },
   );
   return data.workflow;
+}
+
+export async function getIssueWorkflow(
+  taskId: string,
+  signal?: AbortSignal,
+): Promise<IssueWorkflowSnapshot> {
+  return request<IssueWorkflowSnapshot>(
+    `/api/local/tasks/${encodeURIComponent(taskId)}/workflow`,
+    { signal },
+  );
+}
+
+export async function generateWorkflowRevision(
+  taskId: string,
+  templateId: string,
+): Promise<WorkflowRevision> {
+  const data = await request<{ revision: WorkflowRevision }>(
+    `/api/local/tasks/${encodeURIComponent(taskId)}/workflow/revisions`,
+    {
+      method: "POST",
+      body: JSON.stringify({ templateId }),
+    },
+  );
+  return data.revision;
+}
+
+export async function enqueueWorkflowRevision(
+  revisionId: string,
+): Promise<WorkflowRunSnapshot> {
+  const data = await request<{ snapshot: WorkflowRunSnapshot }>(
+    `/api/local/workflow/revisions/${encodeURIComponent(revisionId)}/enqueue`,
+    { method: "POST" },
+  );
+  return data.snapshot;
+}
+
+export async function getWorkflowRun(
+  runId: string,
+  signal?: AbortSignal,
+): Promise<WorkflowRunSnapshot> {
+  const data = await request<{ snapshot: WorkflowRunSnapshot }>(
+    `/api/local/workflow/runs/${encodeURIComponent(runId)}`,
+    { signal },
+  );
+  return data.snapshot;
+}
+
+export async function sendWorkflowNodeMessage(
+  nodeRunId: string,
+  input: { mode: "steer" | "queued"; content: string },
+): Promise<{ message: WorkflowInboxMessage; snapshot: WorkflowRunSnapshot }> {
+  return request<{ message: WorkflowInboxMessage; snapshot: WorkflowRunSnapshot }>(
+    `/api/local/workflow/nodes/${encodeURIComponent(nodeRunId)}/messages`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export async function controlWorkflowNode(
+  nodeRunId: string,
+  action: WorkflowNodeControlAction,
+): Promise<WorkflowRunSnapshot> {
+  const data = await request<{ snapshot: WorkflowRunSnapshot }>(
+    `/api/local/workflow/nodes/${encodeURIComponent(nodeRunId)}/control`,
+    {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    },
+  );
+  return data.snapshot;
+}
+
+export async function createWorkflowAmendment(
+  runId: string,
+  input: WorkflowAmendmentInput,
+): Promise<WorkflowRunAmendment> {
+  const data = await request<{ amendment: WorkflowRunAmendment }>(
+    `/api/local/workflow/runs/${encodeURIComponent(runId)}/amendments`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+  return data.amendment;
+}
+
+export async function applyWorkflowAmendment(
+  amendmentId: string,
+): Promise<WorkflowRunSnapshot> {
+  const data = await request<{ snapshot: WorkflowRunSnapshot }>(
+    `/api/local/workflow/amendments/${encodeURIComponent(amendmentId)}/apply`,
+    { method: "POST" },
+  );
+  return data.snapshot;
 }
 
 export async function createProject(input: {

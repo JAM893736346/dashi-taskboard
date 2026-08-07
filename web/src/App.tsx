@@ -160,6 +160,10 @@ const EVENT_NAMES = [
   "attachment.deleted",
   "project.created",
   "workflow.updated",
+  "workflow.revision.updated",
+  "workflow.run.updated",
+  "workflow.node.updated",
+  "workflow.event.created",
 ] as const;
 
 function isTheme(value: unknown): value is Theme {
@@ -253,6 +257,7 @@ function taskToDraft(task: Task): TaskDraft {
 }
 
 interface LocalRealtimeSyncProps {
+  syncBusinessState: boolean;
   selectedProjectId: string;
   detailTaskId: string | null;
   refreshProjectList: () => Promise<void>;
@@ -264,9 +269,11 @@ interface LocalRealtimeSyncProps {
   setConnection: Dispatch<SetStateAction<ConnectionState>>;
   setCommentsRevision: Dispatch<SetStateAction<number>>;
   setAttachmentsRevision: Dispatch<SetStateAction<number>>;
+  setWorkflowRuntimeRevision: Dispatch<SetStateAction<number>>;
 }
 
 function LocalRealtimeSync({
+  syncBusinessState,
   selectedProjectId,
   detailTaskId,
   refreshProjectList,
@@ -275,6 +282,7 @@ function LocalRealtimeSync({
   setConnection,
   setCommentsRevision,
   setAttachmentsRevision,
+  setWorkflowRuntimeRevision,
 }: LocalRealtimeSyncProps) {
   useEffect(() => {
     const source = new EventSource("/api/events");
@@ -304,6 +312,18 @@ function LocalRealtimeSync({
       } catch {
         // A malformed event should not interrupt later updates.
       }
+      if (
+        event.type === "workflow.revision.updated"
+        || event.type === "workflow.run.updated"
+        || event.type === "workflow.node.updated"
+        || event.type === "workflow.event.created"
+      ) {
+        if (detailTaskId && payload.taskId === detailTaskId) {
+          setWorkflowRuntimeRevision((current) => current + 1);
+        }
+        return;
+      }
+      if (!syncBusinessState) return;
       const affectsSelectedProject = Boolean(selectedProjectId)
         && (!payload.projectId || payload.projectId === selectedProjectId);
       if (event.type === "project.created") {
@@ -336,6 +356,7 @@ function LocalRealtimeSync({
 
     EVENT_NAMES.forEach((name) => source.addEventListener(name, handleEvent));
     source.onopen = () => {
+      if (!syncBusinessState) return;
       setConnection("live");
       scheduleRefresh({ projects: true, tasks: Boolean(selectedProjectId) });
       if (selectedProjectId) void refreshWorkflowOptions(selectedProjectId);
@@ -344,7 +365,9 @@ function LocalRealtimeSync({
         setAttachmentsRevision((current) => current + 1);
       }
     };
-    source.onerror = () => setConnection("reconnecting");
+    source.onerror = () => {
+      if (syncBusinessState) setConnection("reconnecting");
+    };
 
     return () => {
       window.clearTimeout(refreshTimer);
@@ -360,6 +383,8 @@ function LocalRealtimeSync({
     setAttachmentsRevision,
     setCommentsRevision,
     setConnection,
+    setWorkflowRuntimeRevision,
+    syncBusinessState,
   ]);
 
   return null;
@@ -403,6 +428,7 @@ export function App() {
   const [commentsRevision, setCommentsRevision] = useState(0);
   const [attachmentsRevision, setAttachmentsRevision] = useState(0);
   const [workflowRevision, setWorkflowRevision] = useState(0);
+  const [workflowRuntimeRevision, setWorkflowRuntimeRevision] = useState(0);
   const [workflowOptions, setWorkflowOptions] = useState<WorkflowOption[]>(DEFAULT_WORKFLOW_OPTIONS);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
@@ -1612,8 +1638,9 @@ export function App() {
 
   return (
     <div className={`app-shell${embedded ? " embedded" : ""}`} style={appShellStyle}>
-      {taskboardMetadata && taskboardMetadata.mode !== "cloud" && (
+      {taskboardMetadata && (
         <LocalRealtimeSync
+          syncBusinessState={taskboardMetadata.mode !== "cloud"}
           selectedProjectId={selectedProjectId}
           detailTaskId={detailTaskId}
           refreshProjectList={refreshProjectList}
@@ -1622,6 +1649,7 @@ export function App() {
           setConnection={setConnection}
           setCommentsRevision={setCommentsRevision}
           setAttachmentsRevision={setAttachmentsRevision}
+          setWorkflowRuntimeRevision={setWorkflowRuntimeRevision}
         />
       )}
       {!embedded && (
@@ -2033,6 +2061,7 @@ export function App() {
             developmentScanLoading={developmentScanLoading}
             commentsRevision={commentsRevision}
             attachmentsRevision={attachmentsRevision}
+            workflowRuntimeRevision={workflowRuntimeRevision}
             onUpdate={(current, changes) => updateTaskProperties(current, changes)}
             onOpenTask={openTaskDetail}
             onAddRelation={(current, type, relatedTaskId) => (

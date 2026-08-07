@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -68,6 +68,10 @@ const PRIORITY_DETAILS: Record<TaskPriority, { label: string; bars: number }> = 
   low: { label: "低", bars: 1 },
 };
 
+const IssueWorkflowPanel = lazy(() => import("./IssueWorkflowPanel").then((module) => ({
+  default: module.IssueWorkflowPanel,
+})));
+
 interface TaskDetailProps {
   task: Task;
   tasks: Task[];
@@ -78,6 +82,7 @@ interface TaskDetailProps {
   developmentScanLoading: boolean;
   commentsRevision: number;
   attachmentsRevision: number;
+  workflowRuntimeRevision: number;
   onUpdate: (task: Task, changes: Partial<TaskDraft>) => Promise<Task>;
   onOpenTask: (task: TaskRelationSummary) => void;
   onAddRelation: (
@@ -192,6 +197,7 @@ export function TaskDetail({
   developmentScanLoading,
   commentsRevision,
   attachmentsRevision,
+  workflowRuntimeRevision,
   onUpdate,
   onOpenTask,
   onAddRelation,
@@ -202,6 +208,7 @@ export function TaskDetail({
   onError,
   onAnnounce,
 }: TaskDetailProps) {
+  const [activeTab, setActiveTab] = useState<"details" | "workflow">("details");
   const [currentTask, setCurrentTask] = useState(task);
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState(task.description);
@@ -572,9 +579,38 @@ export function TaskDetail({
 
   return (
     <section className="issue-detail" aria-label={`${task.identifier} 议题详情`}>
-      <div className="issue-detail-scroll">
-        <div className="issue-detail-layout">
-          <div className="issue-detail-main">
+      <header className="issue-detail-tabs-header">
+        <div className="issue-detail-identity">
+          <span>{currentTask.identifier}</span>
+          <strong>{title || currentTask.title}</strong>
+        </div>
+        <div className="issue-detail-tabs" role="tablist" aria-label="议题视图">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "details"}
+            className={activeTab === "details" ? "active" : ""}
+            onClick={() => setActiveTab("details")}
+          >
+            详情
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "workflow"}
+            className={activeTab === "workflow" ? "active" : ""}
+            onClick={() => setActiveTab("workflow")}
+          >
+            Workflow
+          </button>
+        </div>
+      </header>
+
+      {activeTab === "details" ? (
+        <>
+          <div className="issue-detail-scroll">
+            <div className="issue-detail-layout">
+              <div className="issue-detail-main">
             <article className="issue-editor" aria-label="议题内容">
               <div className="issue-editor-content">
                 <textarea
@@ -1132,37 +1168,52 @@ export function TaskDetail({
               <span>创建于 {exactTime(currentTask.createdAt)}</span>
               {currentTask.updatedAt !== currentTask.createdAt && <span>更新于 {exactTime(currentTask.updatedAt)}</span>}
             </div>
-          </aside>
-        </div>
-      </div>
-
-      {pendingDelete && (
-        <div className="delete-backdrop" role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !deleting) setPendingDelete(null);
-        }}>
-          <div className="delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-comment-title">
-            <h2 id="delete-comment-title">删除这条评论？</h2>
-            <p>此操作无法撤销。</p>
-            <div>
-              <button className="button secondary" type="button" disabled={deleting} onClick={() => setPendingDelete(null)}>取消</button>
-              <button className="button danger" type="button" disabled={deleting} onClick={() => void confirmDelete()}>{deleting ? "删除中…" : "删除评论"}</button>
+              </aside>
             </div>
           </div>
-        </div>
-      )}
 
-      {pendingAttachmentDelete && (
-        <div className="delete-backdrop" role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !deletingAttachment) setPendingAttachmentDelete(null);
-        }}>
-          <div className="delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-attachment-title">
-            <h2 id="delete-attachment-title">删除这个附件？</h2>
-            <p>“{pendingAttachmentDelete.filename}” 将被永久删除，此操作无法撤销。</p>
-            <div>
-              <button className="button secondary" type="button" disabled={deletingAttachment} onClick={() => setPendingAttachmentDelete(null)}>取消</button>
-              <button className="button danger" type="button" disabled={deletingAttachment} onClick={() => void confirmAttachmentDelete()}>{deletingAttachment ? "删除中…" : "删除附件"}</button>
+          {pendingDelete && (
+            <div className="delete-backdrop" role="presentation" onMouseDown={(event) => {
+              if (event.target === event.currentTarget && !deleting) setPendingDelete(null);
+            }}>
+              <div className="delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-comment-title">
+                <h2 id="delete-comment-title">删除这条评论？</h2>
+                <p>此操作无法撤销。</p>
+                <div>
+                  <button className="button secondary" type="button" disabled={deleting} onClick={() => setPendingDelete(null)}>取消</button>
+                  <button className="button danger" type="button" disabled={deleting} onClick={() => void confirmDelete()}>{deleting ? "删除中…" : "删除评论"}</button>
+                </div>
+              </div>
             </div>
-          </div>
+          )}
+
+          {pendingAttachmentDelete && (
+            <div className="delete-backdrop" role="presentation" onMouseDown={(event) => {
+              if (event.target === event.currentTarget && !deletingAttachment) setPendingAttachmentDelete(null);
+            }}>
+              <div className="delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-attachment-title">
+                <h2 id="delete-attachment-title">删除这个附件？</h2>
+                <p>“{pendingAttachmentDelete.filename}” 将被永久删除，此操作无法撤销。</p>
+                <div>
+                  <button className="button secondary" type="button" disabled={deletingAttachment} onClick={() => setPendingAttachmentDelete(null)}>取消</button>
+                  <button className="button danger" type="button" disabled={deletingAttachment} onClick={() => void confirmAttachmentDelete()}>{deletingAttachment ? "删除中…" : "删除附件"}</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="issue-workflow-scroll">
+          <Suspense fallback={<div className="issue-workflow-loading">正在打开 Workflow…</div>}>
+            <IssueWorkflowPanel
+              task={currentTask}
+              workflows={workflows}
+              revision={workflowRuntimeRevision}
+              onOpenThread={onOpenThread}
+              onError={onError}
+              onAnnounce={onAnnounce}
+            />
+          </Suspense>
         </div>
       )}
     </section>

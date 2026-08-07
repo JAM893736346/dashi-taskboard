@@ -255,6 +255,261 @@ export interface WorkflowOption {
   name: string;
 }
 
+export type WorkflowPrimitive = "codex-thread" | "human-gate" | "condition" | "issue-action";
+export type WorkflowRunStatus =
+  | "queued"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled";
+export type WorkflowNodeStatus =
+  | "blocked"
+  | "ready"
+  | "running"
+  | "awaiting_confirmation"
+  | "succeeded"
+  | "rejected"
+  | "failed"
+  | "interrupted"
+  | "recovery_required"
+  | "migration_required"
+  | "cancelled";
+
+export interface WorkflowRuntimeGraph {
+  schemaVersion: 1;
+  goal: string;
+  defaults: {
+    model: string;
+    effort: string;
+    concurrencyLimit: number;
+    failFast: boolean;
+  };
+  nodes: WorkflowRuntimeNodeDefinition[];
+}
+
+export interface WorkflowRuntimeDependency {
+  nodeId: string;
+  outcome?: "true" | "false";
+}
+
+export interface WorkflowRuntimeResource {
+  key: string;
+  mode: "shared" | "exclusive";
+}
+
+export interface WorkflowRuntimeNodeDefinition {
+  id: string;
+  type: WorkflowPrimitive;
+  executorVersion: 1;
+  title: string;
+  objective: string;
+  dependsOn: WorkflowRuntimeDependency[];
+  approvalMode: "automatic" | "manual";
+  config: Record<string, unknown>;
+  resources: WorkflowRuntimeResource[];
+}
+
+export interface WorkflowValidationError {
+  path: string;
+  code: string;
+  message: string;
+}
+
+export interface WorkflowReviewFinding {
+  severity: string;
+  nodeId: string | null;
+  message: string;
+}
+
+export interface WorkflowReviewReport {
+  verdict?: "pass" | "revise";
+  stage?: string;
+  summary: string;
+  findings: Array<WorkflowReviewFinding | WorkflowValidationError>;
+  generatorThreadId?: string;
+}
+
+export interface WorkflowTemplateRevision {
+  id: string;
+  projectId: string;
+  templateId: string;
+  revision: number;
+  name: string;
+  sourceWorkspaceVersion: number;
+  sourceSnapshot: { tab: unknown; snapshot: unknown };
+  sourceHash: string;
+  createdAt: string;
+}
+
+export interface WorkflowTemplateSummary {
+  id: string;
+  name: string;
+  workspaceVersion: number;
+  templateRevision: WorkflowTemplateRevision | null;
+}
+
+export interface WorkflowRevision {
+  id: string;
+  taskId: string;
+  projectId: string;
+  templateId: string;
+  templateRevisionId: string;
+  templateRevision: number;
+  revision: number;
+  status: "draft" | "reviewing" | "ready";
+  graphSnapshot: WorkflowRuntimeGraph | null;
+  graphSchemaVersion: 1 | null;
+  validationErrors: WorkflowValidationError[];
+  reviewReport: WorkflowReviewReport | null;
+  plannerThreadId: string | null;
+  reviewerThreadId: string | null;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  templateRevisionRecord?: WorkflowTemplateRevision | null;
+}
+
+export interface WorkflowRun {
+  id: string;
+  taskId: string;
+  projectId: string;
+  templateId: string;
+  workflowRevisionId: string;
+  workflowRevision: number;
+  templateRevisionId: string;
+  templateRevision: number;
+  status: WorkflowRunStatus;
+  graphSnapshot: WorkflowRuntimeGraph;
+  graphSchemaVersion: 1;
+  concurrencyLimit: number;
+  failFast: boolean;
+  amendmentRevision: number;
+  planningPath: string;
+  version: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string;
+}
+
+export interface WorkflowNodeRun {
+  id: string;
+  runId: string;
+  definitionId: string;
+  type: WorkflowPrimitive;
+  executorVersion: 1;
+  status: WorkflowNodeStatus;
+  approvalMode: "automatic" | "manual";
+  config: Record<string, unknown>;
+  resources: WorkflowRuntimeResource[];
+  result: Record<string, unknown> | null;
+  branchOutcome: "true" | "false" | null;
+  activeAttemptId: string | null;
+  leaseOwner: string | null;
+  leaseExpiresAt: string | null;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkflowNodeAttempt {
+  id: string;
+  nodeRunId: string;
+  attemptNumber: number;
+  idempotencyKey: string;
+  status: "running" | "completed" | "failed" | "interrupted" | "recovery_required" | "cancelled";
+  threadId: string | null;
+  turnId: string | null;
+  lastFinishedTurnId: string | null;
+  lastFinishedStatus: string | null;
+  lastFinishedCandidateResultPresent: boolean;
+  lastFinishedCandidateResult: unknown;
+  lastFinishedErrorPresent: boolean;
+  lastFinishedError: unknown;
+  candidateResult: unknown;
+  error: unknown;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+export interface WorkflowInboxMessage {
+  id: string;
+  runId: string;
+  targetNodeRunId: string;
+  sourceType: "user" | "agent";
+  sourceNodeRunId: string | null;
+  mode: "steer" | "queued";
+  status: "pending" | "delivered" | "fallback_queued" | "cancelled";
+  sequence: number;
+  content: string;
+  expectedTurnId: string | null;
+  createdAt: string;
+  deliveredAt: string | null;
+}
+
+export interface WorkflowSubagent {
+  id: string;
+  nodeRunId: string;
+  attemptId: string;
+  threadId: string;
+  parentThreadId: string;
+  role: string | null;
+  model: string | null;
+  status: "running" | "completed" | "failed" | "interrupted" | "cancelled";
+  activity: Record<string, unknown> | null;
+  result: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkflowEvent {
+  id: string;
+  runId: string;
+  nodeRunId: string | null;
+  attemptId: string | null;
+  type: string;
+  data: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface WorkflowRunAmendment {
+  id: string;
+  runId: string;
+  revision: number;
+  source: "user_configured" | "codex_generated";
+  status: "draft" | "reviewing" | "ready" | "applied" | "rejected";
+  patch:
+    | { node: WorkflowRuntimeNodeDefinition }
+    | { prompt: string; dependsOn: string[] };
+  reviewReport: WorkflowReviewReport | null;
+  reviewerThreadId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IssueWorkflowSnapshot {
+  templates: WorkflowTemplateSummary[];
+  revisions: WorkflowRevision[];
+  activeRun: WorkflowRunSnapshot | null;
+}
+
+export interface WorkflowRunSnapshot {
+  run: WorkflowRun;
+  effectiveGraph: WorkflowRuntimeGraph;
+  nodes: WorkflowNodeRun[];
+  attempts: WorkflowNodeAttempt[];
+  inbox: WorkflowInboxMessage[];
+  subagents: WorkflowSubagent[];
+  amendments: WorkflowRunAmendment[];
+  events: WorkflowEvent[];
+}
+
+export type WorkflowNodeControlAction = "approve" | "reject" | "interrupt" | "retry" | "cancel";
+export type WorkflowAmendmentInput =
+  | { source: "user_configured"; node: WorkflowRuntimeNodeDefinition }
+  | { source: "codex_generated"; prompt: string; dependsOn: string[] };
+
 export interface WorkflowWorkspaceRecord<T = unknown> {
   projectId: string;
   workspace: T | null;
