@@ -9,13 +9,14 @@ import {
 import type {
   IssueWorkflowSnapshot,
   Task,
-  WorkflowNodeStatus,
   WorkflowOption,
   WorkflowReviewFinding,
   WorkflowRunStatus,
   WorkflowValidationError,
 } from "../types";
 import { LinearIcon } from "./LinearIcon";
+import { WorkflowRunGraph } from "./WorkflowRunGraph";
+import { WorkflowRunInspector } from "./WorkflowRunInspector";
 
 interface IssueWorkflowPanelProps {
   task: Task;
@@ -38,20 +39,6 @@ const RUN_STATUS_LABELS: Record<WorkflowRunStatus, string> = {
   paused: "已暂停",
   completed: "已完成",
   failed: "失败",
-  cancelled: "已取消",
-};
-
-const NODE_STATUS_LABELS: Record<WorkflowNodeStatus, string> = {
-  blocked: "等待依赖",
-  ready: "就绪",
-  running: "运行中",
-  awaiting_confirmation: "等待确认",
-  succeeded: "已完成",
-  rejected: "已拒绝",
-  failed: "失败",
-  interrupted: "已中断",
-  recovery_required: "需要恢复",
-  migration_required: "需要迁移",
   cancelled: "已取消",
 };
 
@@ -89,6 +76,8 @@ export function IssueWorkflowPanel({
   );
   const [loading, setLoading] = useState(true);
   const [pendingAction, setPendingAction] = useState<"generate" | "enqueue" | null>(null);
+  const [selectedNodeRunId, setSelectedNodeRunId] = useState<string | null>(null);
+  const [inspectorTab, setInspectorTab] = useState<"subagents" | undefined>();
 
   useEffect(() => {
     if (workflows.some((workflow) => workflow.id === selectedTemplateId)) return;
@@ -119,9 +108,6 @@ export function IssueWorkflowPanel({
     ?? selectedRevision?.validationErrors
     ?? [];
   const activeRun = snapshot?.activeRun ?? null;
-  const nodeDefinitions = new Map(
-    activeRun?.effectiveGraph.nodes.map((node) => [node.id, node]) ?? [],
-  );
 
   async function generateRevision() {
     if (!selectedTemplateId) return;
@@ -271,7 +257,7 @@ export function IssueWorkflowPanel({
           </section>
 
           {activeRun && (
-            <section className="issue-workflow-run-summary" aria-labelledby="workflow-run-heading">
+            <section className="issue-workflow-run" aria-labelledby="workflow-run-heading">
               <header>
                 <div>
                   <span>持久化运行</span>
@@ -281,15 +267,25 @@ export function IssueWorkflowPanel({
                   {RUN_STATUS_LABELS[activeRun.run.status]}
                 </span>
               </header>
-              <ul>
-                {activeRun.nodes.map((node) => (
-                  <li key={node.id}>
-                    <span className={`workflow-node-status is-${node.status}`} aria-hidden="true" />
-                    <strong>{nodeDefinitions.get(node.definitionId)?.title ?? node.definitionId}</strong>
-                    <span>{NODE_STATUS_LABELS[node.status]}</span>
-                  </li>
-                ))}
-              </ul>
+              <div className="issue-workflow-runtime">
+                <WorkflowRunGraph
+                  snapshot={activeRun}
+                  selectedNodeRunId={selectedNodeRunId}
+                  onSelectNode={(nodeRunId, tab) => {
+                    setSelectedNodeRunId(nodeRunId);
+                    setInspectorTab(tab);
+                  }}
+                />
+                <WorkflowRunInspector
+                  snapshot={activeRun}
+                  selectedNodeRunId={selectedNodeRunId}
+                  initialTab={inspectorTab}
+                  onSnapshotChange={(nextRun) => setSnapshot((current) => current ? { ...current, activeRun: nextRun } : current)}
+                  onOpenThread={onOpenThread}
+                  onError={onError}
+                  onAnnounce={onAnnounce}
+                />
+              </div>
             </section>
           )}
         </>
