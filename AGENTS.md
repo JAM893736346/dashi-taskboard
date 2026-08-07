@@ -164,12 +164,13 @@ only when the task's approved verification scope calls for them.
 
 For feature work in this repository, use this order:
 
-1. Before implementation, prove the real operation path to the user: entry point → user or agent action → data change or other side effect → observable result. Cite the actual component, API, and file involved, or demonstrate the path in the product. This proof is not a test.
-2. Implement the requested main path with the smallest direct change that makes it work.
-3. After implementation, demonstrate or verify only that direct operation path and give the result to the user for confirmation.
-4. Before the user confirms the feature works, do not proactively add guardrails, mutation or regression tests, legacy compatibility protection, defensive extensions, or speculative fallback behavior.
-5. User confirmation does not automatically authorize that follow-up work. Add targeted protection or tests only when the user explicitly asks for them, or when the user reports a concrete failure scenario that requires them.
-6. After completing and verifying each user request, automatically create a focused Git commit containing only that request's changes. Do not ask for confirmation. Keep unrelated worktree changes unstaged and use an imperative Conventional Commit message.
+1. Before designing or implementing any new feature, invoke and complete the installed `grilling` skill. Ask one decision question at a time, include a recommended answer with each question, and do not begin design or implementation until the user explicitly confirms shared understanding. This rule does not apply to pure bug fixes, documentation, refactoring, or dependency updates.
+2. Before implementation, prove the real operation path to the user: entry point → user or agent action → data change or other side effect → observable result. Cite the actual component, API, and file involved, or demonstrate the path in the product. This proof is not a test.
+3. Implement the requested main path with the smallest direct change that makes it work.
+4. After implementation, demonstrate or verify only that direct operation path and give the result to the user for confirmation.
+5. Before the user confirms the feature works, do not proactively add guardrails, mutation or regression tests, legacy compatibility protection, defensive extensions, or speculative fallback behavior.
+6. User confirmation does not automatically authorize that follow-up work. Add targeted protection or tests only when the user explicitly asks for them, or when the user reports a concrete failure scenario that requires them.
+7. After completing and verifying each user request, automatically create a focused Git commit containing only that request's changes. Do not ask for confirmation. Keep unrelated worktree changes unstaged and use an imperative Conventional Commit message.
 
 The primary objective is to make the requested function work. Focus on the feature implementation itself and avoid over-design; safety, guardrails, and testing must not dominate the work or turn the feature into a surrounding engineering project. This rule supersedes the earlier standing instruction that every feature must be developed test-first. Test-first language in older issues does not apply unless the user restates it for that issue after this rule.
 
