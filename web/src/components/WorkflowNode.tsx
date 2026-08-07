@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
+import type { TaskStatus } from "../types";
 import { LinearIcon, type LinearIconName } from "./LinearIcon";
 import { WorkflowMark } from "./WorkflowMark";
 
@@ -61,6 +62,16 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   conditionField?: string;
   conditionOperator?: string;
   conditionValue?: string;
+  runtimePrimitive?: "codex-thread" | "human-gate" | "condition" | "issue-action";
+  rolePreset?: "planning" | "implementation" | "verification" | "review" | "custom";
+  runtimeObjective?: string;
+  runtimeModel?: string;
+  runtimeEffort?: string;
+  runtimeSandbox?: "readOnly" | "workspaceWrite" | "dangerFullAccess";
+  runtimeApprovalMode?: "automatic" | "manual";
+  runtimeResourceMode?: "workspace-read" | "workspace-write" | "isolated-worktree";
+  humanGateMessage?: string;
+  issueActionStatus?: TaskStatus;
   feishuRecipientType?: "self" | "user" | "chat";
   feishuUserId?: string;
   feishuChatId?: string;

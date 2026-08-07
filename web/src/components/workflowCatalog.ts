@@ -223,9 +223,53 @@ export const PALETTE_ITEMS: PaletteItem[] = [
       tone: "planning",
       inputLabel: "待判断数据",
       outputLabel: "符合条件的数据",
+      runtimePrimitive: "condition",
       conditionField: "issue-status",
       conditionOperator: "equals",
       conditionValue: "todo",
+    },
+  },
+  {
+    group: "规划",
+    title: "Codex Chat",
+    description: "启动一个正式 Codex 对话执行节点",
+    data: {
+      kind: "codex-thread",
+      eyebrow: "CODEX CHAT",
+      title: "Codex Chat",
+      description: "在独立正式对话中完成一个明确目标",
+      meta: "自定义角色 · 推荐模型",
+      icon: "conversation",
+      logo: codexLogo,
+      tone: "planning",
+      inputLabel: "结构化上下文",
+      outputLabel: "执行结果",
+      runtimePrimitive: "codex-thread",
+      rolePreset: "custom",
+      runtimeObjective: "完成当前流程节点的目标",
+      runtimeModel: "",
+      runtimeEffort: "",
+      runtimeSandbox: "readOnly",
+      runtimeApprovalMode: "automatic",
+      runtimeResourceMode: "workspace-read",
+    },
+  },
+  {
+    group: "流程控制",
+    title: "Taskboard 确认",
+    description: "等待用户确认后继续流程",
+    data: {
+      kind: "human-gate",
+      eyebrow: "HUMAN GATE",
+      title: "Taskboard 确认",
+      description: "等待用户确认当前结果",
+      meta: "需要用户确认",
+      icon: "check",
+      tone: "result",
+      inputLabel: "待确认结果",
+      outputLabel: "确认结论",
+      runtimePrimitive: "human-gate",
+      humanGateMessage: "请确认当前执行结果后继续。",
     },
   },
   {
@@ -414,7 +458,7 @@ export const PALETTE_ITEMS: PaletteItem[] = [
       eyebrow: "INTEGRATION",
       title: "飞书消息",
       description: "通过飞书开放平台发送消息",
-      meta: "飞书开放平台 · IM",
+      meta: "后续版本 · 飞书开放平台",
       icon: "conversation",
       logo: FEISHU_LOGO,
       tone: "integration",
@@ -635,6 +679,24 @@ export const PALETTE_ITEMS: PaletteItem[] = [
   },
   {
     group: "结果",
+    title: "Issue Action",
+    description: "把当前 Issue 更新为指定状态",
+    data: {
+      kind: "issue-action",
+      eyebrow: "ISSUE ACTION",
+      title: "Issue Action",
+      description: "更新当前流程所属 Issue 的状态",
+      meta: "状态 → 审核中",
+      icon: "write",
+      tone: "result",
+      inputLabel: "已确认结果",
+      outputLabel: "Issue 已更新",
+      runtimePrimitive: "issue-action",
+      issueActionStatus: "in_review",
+    },
+  },
+  {
+    group: "结果",
     title: "添加 ISSUE",
     description: "在当前项目中创建新议题",
     data: {
@@ -745,6 +807,20 @@ export function capabilityNodeMeta(
   capabilities: WorkflowCapabilities | null,
   failed: boolean,
 ): string {
+  if (data.kind === "codex-thread") {
+    const role = data.rolePreset === "planning"
+      ? "规划"
+      : data.rolePreset === "implementation"
+        ? "实现"
+        : data.rolePreset === "verification"
+          ? "验证"
+          : data.rolePreset === "review" ? "审查" : "自定义";
+    return `${role} · ${data.runtimeModel || "推荐模型"}`;
+  }
+  if (data.kind === "human-gate") return "需要用户确认";
+  if (data.kind === "issue-action") {
+    return `状态 → ${optionLabel(ISSUE_STATUSES, data.issueActionStatus ?? "in_review")}`;
+  }
   if (data.kind === "issue-create") {
     const status = optionLabel(ISSUE_STATUSES, data.createIssueStatus ?? "todo");
     const priority = optionLabel(ISSUE_PRIORITIES, data.createIssuePriority ?? "none");
@@ -800,6 +876,11 @@ function twitterPostSummary(value: string): string {
 }
 
 export function workflowNodeDisplayTitle(data: WorkflowNodeData): string {
+  if (data.kind === "issue-action") {
+    return formatActionTitle(data.title, [
+      `状态 → ${optionLabel(ISSUE_STATUSES, data.issueActionStatus ?? "in_review")}`,
+    ]);
+  }
   if (data.kind === "issue-create") {
     const issueTitle = data.createIssueTitle?.trim();
     return formatActionTitle(data.title, issueTitle ? [issueTitle] : []);
@@ -876,6 +957,11 @@ export function workflowNodeConfigured(
   capabilities: WorkflowCapabilities | null,
   failed: boolean,
 ): boolean {
+  if (data.kind === "codex-thread") return Boolean(data.runtimeObjective?.trim());
+  if (data.kind === "human-gate") return Boolean(data.humanGateMessage?.trim());
+  if (data.kind === "issue-action") {
+    return ISSUE_STATUSES.some((status) => status.value === data.issueActionStatus);
+  }
   if (data.kind === "issue-create") {
     return Boolean(data.createIssueTitle?.trim());
   }

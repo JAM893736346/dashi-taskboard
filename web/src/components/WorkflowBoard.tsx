@@ -266,11 +266,11 @@ function normalizeSnapshot(snapshot: LegacyWorkflowSnapshot): WorkflowSnapshot {
 }
 
 function initialNodes(): WorkflowCanvasNode[] {
-  const nodes: WorkflowCanvasNode[] = [
+  return [
     {
       id: "issue-trigger",
       type: "workflow",
-      position: { x: 0, y: 48 },
+      position: { x: 0, y: 0 },
       data: {
         ...paletteData("issue-trigger"),
         title: "议题触发器",
@@ -279,104 +279,104 @@ function initialNodes(): WorkflowCanvasNode[] {
       },
     },
     {
-      id: "basic-planning",
+      id: "planning-chat",
       type: "workflow",
-      position: { x: 0, y: 184 },
+      position: { x: 0, y: 0 },
       data: {
-        ...paletteData("basic-planning"),
-        title: "拆解议题执行计划",
-        description: "生成步骤、依赖和验收条件",
-        meta: "基础规划 · 当前项目",
+        ...paletteData("codex-thread"),
+        title: "规划 Chat",
+        description: "分析议题并产出可执行计划",
+        rolePreset: "planning",
+        runtimeObjective: "分析议题、依赖与风险，产出可直接执行的计划和验收条件。",
+        runtimeEffort: "high",
+        runtimeSandbox: "readOnly",
+        runtimeApprovalMode: "automatic",
+        runtimeResourceMode: "workspace-read",
       },
     },
     {
-      id: "skill",
+      id: "implementation-chat",
       type: "workflow",
-      parentId: "basic-planning",
-      position: planItemPosition(0),
+      position: { x: 0, y: 0 },
       data: {
-        ...paletteData("skill"),
-        title: "调用 Skill",
-        description: "运行一个已安装的 Skill",
-        meta: "尚未选择 Skill",
+        ...paletteData("codex-thread"),
+        title: "实现 Chat",
+        description: "按计划完成代码与仓库变更",
+        rolePreset: "implementation",
+        runtimeObjective: "按批准计划实现当前议题，并保留清晰的变更边界。",
+        runtimeEffort: "high",
+        runtimeSandbox: "workspaceWrite",
+        runtimeApprovalMode: "automatic",
+        runtimeResourceMode: "workspace-write",
       },
     },
     {
-      id: "mcp",
+      id: "verification-chat",
       type: "workflow",
-      parentId: "basic-planning",
-      position: planItemPosition(1),
+      position: { x: 0, y: 0 },
       data: {
-        ...paletteData("mcp"),
-        title: "调用 MCP",
-        description: "连接一个已配置的 MCP Server",
-        meta: "尚未选择 MCP Server",
+        ...paletteData("codex-thread"),
+        title: "验证 Chat",
+        description: "验证主路径和计划验收条件",
+        rolePreset: "verification",
+        runtimeObjective: "验证实现是否满足计划验收条件，并记录可复核证据。",
+        runtimeEffort: "medium",
+        runtimeSandbox: "readOnly",
+        runtimeApprovalMode: "automatic",
+        runtimeResourceMode: "workspace-read",
       },
     },
     {
-      id: "nano-banana",
+      id: "taskboard-confirmation",
       type: "workflow",
-      parentId: "basic-planning",
-      position: planItemPosition(2),
+      position: { x: 0, y: 0 },
       data: {
-        ...paletteData("nano-banana"),
-        title: "生成预览素材",
-        description: "根据议题内容生成预览图",
-        meta: "Nano Banana · 16:9",
+        ...paletteData("human-gate"),
+        title: "Taskboard 确认",
+        description: "等待用户确认交付结果",
+        humanGateMessage: "请确认实现与验证结果，确认后将 Issue 流转到审核中。",
       },
     },
     {
-      id: "cloudflare-deploy",
+      id: "issue-action",
       type: "workflow",
-      parentId: "basic-planning",
-      position: planItemPosition(3),
+      position: { x: 0, y: 0 },
       data: {
-        ...paletteData("cloudflare-deploy"),
-        title: "部署预览版本",
-        description: "构建并发布项目预览",
-        meta: "Cloudflare Pages · Preview",
-      },
-    },
-    {
-      id: "codex-review",
-      type: "workflow",
-      position: { x: 0, y: 520 },
-      data: {
-        ...paletteData("codex-review"),
-        title: "审核交付结果",
-        description: "检查产物、测试与验收条件",
-        meta: "Codex · 自动审核",
-      },
-    },
-    {
-      id: "issue-update",
-      type: "workflow",
-      position: { x: 0, y: 656 },
-      data: {
-        ...paletteData("issue-update"),
-        title: "提交审核",
-        description: "追加结果评论并更新状态",
-        meta: "状态 → 审核中",
+        ...paletteData("issue-action"),
+        title: "进入审核",
+        description: "将当前 Issue 更新为审核中",
+        issueActionStatus: "in_review",
       },
     },
   ];
-  return nodes;
+}
+
+const DEFAULT_WORKFLOW_STEP_IDS = [
+  "issue-trigger",
+  "planning-chat",
+  "implementation-chat",
+  "verification-chat",
+  "taskboard-confirmation",
+  "issue-action",
+];
+
+function createDefaultWorkflowSnapshot(): WorkflowSnapshot {
+  const flow = createWorkflowFlow(DEFAULT_WORKFLOW_STEP_IDS);
+  return {
+    nodes: layoutWorkflowFlow(initialNodes(), flow),
+    flow,
+    selectedNodeId: null,
+  };
 }
 
 function createInitialWorkflowWorkspace() {
-  const stepIds = ["issue-trigger", "basic-planning", "codex-review", "issue-update"];
-  const flow = createWorkflowFlow(stepIds);
   return {
     tabs: [{ id: INITIAL_WORKFLOW_ID, name: INITIAL_WORKFLOW_NAME }],
     activeWorkflowId: INITIAL_WORKFLOW_ID,
     snapshots: new Map<string, WorkflowSnapshot>([
       [
         INITIAL_WORKFLOW_ID,
-        {
-          nodes: layoutWorkflowFlow(initialNodes(), flow),
-          flow,
-          selectedNodeId: null,
-        },
+        createDefaultWorkflowSnapshot(),
       ],
     ]),
   };
@@ -1179,18 +1179,43 @@ export function WorkflowBoard({
     setWorkflowTabMenu(null);
     const workflowId = `workflow-${crypto.randomUUID()}`;
     const workflowName = `未命名流程 ${workflowTabs.length + 1}`;
-    const emptyFlow = createWorkflowFlow();
-    workflowSnapshotsRef.current.set(workflowId, {
-      nodes: [],
-      flow: emptyFlow,
-      selectedNodeId: null,
-    });
+    const snapshot = createDefaultWorkflowSnapshot();
+    workflowSnapshotsRef.current.set(workflowId, snapshot);
     setWorkflowTabs((current) => [...current, { id: workflowId, name: workflowName }]);
     setActiveWorkflowId(workflowId);
-    setNodes([]);
-    setFlow(emptyFlow);
+    setNodes(snapshot.nodes);
+    setFlow(snapshot.flow);
     setSelectedNodeId(null);
     setPickerTarget(null);
+    requestAnimationFrame(() => {
+      void flowRef.current?.fitView({ padding: 0.2, duration: 240, maxZoom: 1 });
+    });
+  }
+
+  function duplicateWorkflow(workflowId: string) {
+    const sourceTab = workflowTabs.find((workflow) => workflow.id === workflowId);
+    if (!sourceTab) return;
+    const sourceSnapshot = workflowId === activeWorkflowId
+      ? { nodes, flow, selectedNodeId: null }
+      : workflowSnapshotsRef.current.get(workflowId);
+    if (!sourceSnapshot) return;
+    const duplicateId = `workflow-${crypto.randomUUID()}`;
+    const duplicateSnapshot = JSON.parse(JSON.stringify(sourceSnapshot)) as WorkflowSnapshot;
+    duplicateSnapshot.selectedNodeId = null;
+    workflowSnapshotsRef.current.set(duplicateId, duplicateSnapshot);
+    setWorkflowTabs((current) => [
+      ...current,
+      { id: duplicateId, name: `${sourceTab.name} 副本` },
+    ]);
+    setActiveWorkflowId(duplicateId);
+    setNodes(normalizeSnapshot(duplicateSnapshot).nodes);
+    setFlow(duplicateSnapshot.flow);
+    setSelectedNodeId(null);
+    setPickerTarget(null);
+    setWorkflowTabMenu(null);
+    requestAnimationFrame(() => {
+      void flowRef.current?.fitView({ padding: 0.2, duration: 240, maxZoom: 1 });
+    });
   }
 
   function openWorkflowTabMenu(
@@ -1440,6 +1465,7 @@ export function WorkflowBoard({
         <aside className="workflow-inspector workflow-step-inspector" aria-label="步骤配置">
           <WorkflowInspector
             node={selectedNode}
+            projectId={projectId}
             projectName={projectName}
             capabilities={workflowCapabilities}
             capabilitiesFailed={workflowCapabilitiesFailed}
@@ -1459,6 +1485,15 @@ export function WorkflowBoard({
           onContextMenu={(event) => event.preventDefault()}
         >
           <div className="context-menu-group">
+            <button
+              className="context-menu-item"
+              type="button"
+              role="menuitem"
+              onClick={() => duplicateWorkflow(workflowTabMenu.workflowId)}
+            >
+              <span className="context-menu-icon"><LinearIcon name="copy" /></span>
+              <span className="context-menu-label">复制流程</span>
+            </button>
             <button
               className="context-menu-item is-danger"
               type="button"

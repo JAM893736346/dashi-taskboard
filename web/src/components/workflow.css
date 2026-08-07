@@ -1238,6 +1238,13 @@
   opacity: 0.48;
 }
 
+.workflow-config-note {
+  margin: 6px 0 0;
+  color: var(--text-tertiary);
+  font-size: 8px;
+  line-height: 1.45;
+}
+
 .workflow-action-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 118px;

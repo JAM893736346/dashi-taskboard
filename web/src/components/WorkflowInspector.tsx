@@ -1,5 +1,6 @@
-import { useState } from "react";
-import type { WorkflowCapabilities } from "../types";
+import { useEffect, useState } from "react";
+import { getAiChatCatalog } from "../api";
+import type { AiChatModel, WorkflowCapabilities } from "../types";
 import { LinearIcon } from "./LinearIcon";
 import {
   type WorkflowCanvasNode,
@@ -21,6 +22,7 @@ import { WorkflowMark } from "./WorkflowMark";
 
 interface WorkflowInspectorProps {
   node: WorkflowCanvasNode;
+  projectId: string;
   projectName: string;
   capabilities: WorkflowCapabilities | null;
   capabilitiesFailed: boolean;
@@ -30,8 +32,29 @@ interface WorkflowInspectorProps {
 
 type InspectorTab = "settings" | "configuration";
 
+const ROLE_PRESETS = [
+  { value: "planning", label: "规划" },
+  { value: "implementation", label: "实现" },
+  { value: "verification", label: "验证" },
+  { value: "review", label: "审查" },
+  { value: "custom", label: "自定义" },
+] as const;
+
+const RUNTIME_SANDBOXES = [
+  { value: "readOnly", label: "只读" },
+  { value: "workspaceWrite", label: "工作区可写" },
+  { value: "dangerFullAccess", label: "完全访问" },
+] as const;
+
+const RUNTIME_RESOURCE_MODES = [
+  { value: "workspace-read", label: "共享读取工作区" },
+  { value: "workspace-write", label: "独占写入工作区" },
+  { value: "isolated-worktree", label: "独立 Worktree" },
+] as const;
+
 export function WorkflowInspector({
   node,
+  projectId,
   projectName,
   capabilities,
   capabilitiesFailed,
@@ -39,6 +62,7 @@ export function WorkflowInspector({
   onClose,
 }: WorkflowInspectorProps) {
   const [activeTab, setActiveTab] = useState<InspectorTab>("settings");
+  const [runtimeModels, setRuntimeModels] = useState<AiChatModel[]>([]);
   const data = node.data;
   const conditionField = data.conditionField ?? CONDITION_FIELDS[0].value;
   const selectedConditionField = CONDITION_FIELDS.find(
@@ -48,6 +72,20 @@ export function WorkflowInspector({
     (operator) => operator === data.conditionOperator,
   ) ?? selectedConditionField.defaultOperator;
   const conditionValue = data.conditionValue || selectedConditionField.defaultValue;
+  const selectedRuntimeModel = runtimeModels.find((model) => model.slug === data.runtimeModel)
+    ?? runtimeModels[0]
+    ?? null;
+
+  useEffect(() => {
+    if (data.kind !== "codex-thread") return;
+    const controller = new AbortController();
+    void getAiChatCatalog(projectId, controller.signal)
+      .then((catalog) => setRuntimeModels(catalog.models))
+      .catch((error) => {
+        if ((error as Error).name !== "AbortError") setRuntimeModels([]);
+      });
+    return () => controller.abort();
+  }, [data.kind, projectId]);
 
   return (
     <div className="workflow-inspector-content">
@@ -138,6 +176,148 @@ export function WorkflowInspector({
         </div>
       ) : (
         <div role="tabpanel" aria-label="配置">
+          {data.kind === "codex-thread" && (
+            <div className="workflow-config-section">
+              <h2>Codex Chat</h2>
+              <label>
+                <span>角色</span>
+                <select
+                  aria-label="Codex Chat 角色"
+                  value={data.rolePreset ?? "custom"}
+                  onChange={(event) => onChange({
+                    rolePreset: event.target.value as WorkflowNodeData["rolePreset"],
+                  })}
+                >
+                  {ROLE_PRESETS.map((role) => (
+                    <option key={role.value} value={role.value}>{role.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>执行目标</span>
+                <textarea
+                  aria-label="Codex Chat 执行目标"
+                  rows={4}
+                  value={data.runtimeObjective ?? ""}
+                  onChange={(event) => onChange({ runtimeObjective: event.target.value })}
+                />
+              </label>
+              <label>
+                <span>模型</span>
+                <select
+                  aria-label="Codex Chat 模型"
+                  value={data.runtimeModel ?? ""}
+                  onChange={(event) => onChange({ runtimeModel: event.target.value })}
+                >
+                  <option value="">
+                    {runtimeModels.length > 0 ? "使用推荐模型" : "正在读取模型"}
+                  </option>
+                  {data.runtimeModel && !runtimeModels.some((model) => model.slug === data.runtimeModel) && (
+                    <option value={data.runtimeModel}>{data.runtimeModel}</option>
+                  )}
+                  {runtimeModels.map((model) => (
+                    <option key={model.slug} value={model.slug}>{model.displayName}</option>
+                  ))}
+                </select>
+              </label>
+              <p className="workflow-config-note">
+                {selectedRuntimeModel
+                  ? `当前解析为 ${selectedRuntimeModel.displayName}`
+                  : "模型目录暂不可用"}
+              </p>
+              <label>
+                <span>推理强度</span>
+                <select
+                  aria-label="Codex Chat 推理强度"
+                  value={data.runtimeEffort ?? ""}
+                  onChange={(event) => onChange({ runtimeEffort: event.target.value })}
+                >
+                  <option value="">跟随角色推荐</option>
+                  {data.runtimeEffort
+                    && !selectedRuntimeModel?.supportedReasoningEfforts.includes(data.runtimeEffort) && (
+                    <option value={data.runtimeEffort}>{data.runtimeEffort}</option>
+                  )}
+                  {(selectedRuntimeModel?.supportedReasoningEfforts ?? []).map((effort) => (
+                    <option key={effort} value={effort}>{effort}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>沙箱</span>
+                <select
+                  aria-label="Codex Chat 沙箱"
+                  value={data.runtimeSandbox ?? "readOnly"}
+                  onChange={(event) => onChange({
+                    runtimeSandbox: event.target.value as WorkflowNodeData["runtimeSandbox"],
+                  })}
+                >
+                  {RUNTIME_SANDBOXES.map((sandbox) => (
+                    <option key={sandbox.value} value={sandbox.value}>{sandbox.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>资源模式</span>
+                <select
+                  aria-label="Codex Chat 资源模式"
+                  value={data.runtimeResourceMode ?? "workspace-read"}
+                  onChange={(event) => onChange({
+                    runtimeResourceMode: event.target.value as WorkflowNodeData["runtimeResourceMode"],
+                  })}
+                >
+                  {RUNTIME_RESOURCE_MODES.map((resource) => (
+                    <option key={resource.value} value={resource.value}>{resource.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="workflow-action-toggle workflow-action-toggle-full">
+                <input
+                  type="checkbox"
+                  checked={(data.runtimeApprovalMode ?? "automatic") === "manual"}
+                  onChange={(event) => onChange({
+                    runtimeApprovalMode: event.target.checked ? "manual" : "automatic",
+                  })}
+                />
+                <span>结果需要手动确认</span>
+              </label>
+            </div>
+          )}
+
+          {data.kind === "human-gate" && (
+            <div className="workflow-config-section">
+              <h2>Taskboard 确认</h2>
+              <label>
+                <span>确认消息</span>
+                <textarea
+                  aria-label="Taskboard 确认消息"
+                  rows={4}
+                  value={data.humanGateMessage ?? ""}
+                  onChange={(event) => onChange({ humanGateMessage: event.target.value })}
+                />
+              </label>
+            </div>
+          )}
+
+          {data.kind === "issue-action" && (
+            <div className="workflow-config-section">
+              <h2>Issue Action</h2>
+              <label>
+                <span>目标状态</span>
+                <select
+                  aria-label="Issue Action 目标状态"
+                  value={data.issueActionStatus ?? "in_review"}
+                  onChange={(event) => onChange({
+                    issueActionStatus: event.target.value as WorkflowNodeData["issueActionStatus"],
+                  })}
+                >
+                  {ISSUE_STATUSES.map((status) => (
+                    <option key={status.value} value={status.value}>{status.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          )}
+
           {data.kind === "issue-create" && (
             <div className="workflow-config-section">
               <h2>创建议题</h2>
