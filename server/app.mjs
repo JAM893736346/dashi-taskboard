@@ -18,6 +18,7 @@ import {
 import { normalizeWorkflowSnapshot } from "../shared/workflow-control-flow.mjs";
 import { normalizeAutomaticProcessingSettings } from "../shared/automatic-processing.mjs";
 import { readCodexQuotaStatus } from "../scripts/codex-rate-limits.mjs";
+import { resolveAiWorkspace } from "./ai-chat-catalog.mjs";
 import { AiChatService } from "./ai-chat.mjs";
 import { AutomaticProcessingDispatcher } from "./automatic-processing.mjs";
 import { createAutomaticProcessingBusinessStore } from "./automatic-processing-business.mjs";
@@ -35,7 +36,10 @@ import {
   createCloudProxy,
   isLocalCompanionRoute,
 } from "./cloud-proxy.mjs";
+import { CodexAppServerClient } from "./codex-app-server.mjs";
 import { ApiError, TaskboardDatabase } from "./database.mjs";
+import { createWorkflowBusinessStore } from "./workflow-business-store.mjs";
+import { WorkflowReviewService } from "./workflow-review.mjs";
 import { WorkflowStore } from "./workflow-store.mjs";
 import {
   ProjectWorkspaceError,
@@ -476,6 +480,14 @@ function parseWorkflowWorkspaceSave(body) {
   return {
     version: parseWorkflowVersion(body.version),
     workspace: parseWorkflowWorkspace(body.workspace),
+  };
+}
+
+function parseWorkflowRevisionCreate(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["templateId"]));
+  return {
+    templateId: stringField(body.templateId, "templateId", { required: true, maxLength: 256 }),
   };
 }
 
@@ -1587,6 +1599,28 @@ export function createTaskboardServer(options = {}) {
       threadIds,
     }),
   });
+  const workflowBusinessStore = options.workflowBusinessStore
+    ?? createWorkflowBusinessStore({ database, cloudConfig, cloudProxy });
+  const workflowCodex = options.workflowCodexClient ?? new CodexAppServerClient({
+    codexExecutable: resolved.codexExecutable,
+    cwd: PROJECT_ROOT,
+  });
+  const workflowReviewService = options.workflowReviewService ?? new WorkflowReviewService({
+    store: workflowStore,
+    businessStore: workflowBusinessStore,
+    codex: workflowCodex,
+    resolveWorkspace: (projectId) => resolveAiWorkspace(
+      projectId,
+      resolved.codexStatePath,
+      database,
+      resolveProjectDevice,
+    ),
+    getCatalog: (projectId) => aiChat.getCatalog(projectId),
+    events,
+    ...(options.workflowReviewTurnTimeoutMs
+      ? { turnTimeoutMs: options.workflowReviewTurnTimeoutMs }
+      : {}),
+  });
   const aiEventResponses = new Set();
 
   const server = createServer(async (request, response) => {
@@ -2028,6 +2062,28 @@ export function createTaskboardServer(options = {}) {
           200,
           await discoverWorkflowCapabilities(resolved, workspacePath ?? PROJECT_ROOT),
         );
+      }
+
+      const taskWorkflowRevisionRoute = pathname.match(
+        /^\/api\/local\/tasks\/([^/]+)\/workflow\/revisions$/,
+      );
+      if (taskWorkflowRevisionRoute) {
+        assertLoopbackRequest(request);
+        assertNoQuery(url.searchParams, "Workflow revision generation");
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const taskId = decodeRouteSegment(taskWorkflowRevisionRoute[1], "Task id");
+        const input = parseWorkflowRevisionCreate(await readJson(request));
+        const revision = await workflowReviewService.generateAndReview({ taskId, ...input });
+        return sendJson(response, 202, { revision });
+      }
+
+      const taskWorkflowRoute = pathname.match(/^\/api\/local\/tasks\/([^/]+)\/workflow$/);
+      if (taskWorkflowRoute) {
+        assertLoopbackRequest(request);
+        assertNoQuery(url.searchParams, "Task workflow snapshot");
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        const taskId = decodeRouteSegment(taskWorkflowRoute[1], "Task id");
+        return sendJson(response, 200, await workflowReviewService.getTaskWorkflow(taskId));
       }
 
       let currentCloudConfig = null;
@@ -2543,6 +2599,9 @@ export function createTaskboardServer(options = {}) {
   return {
     database,
     workflowStore,
+    workflowBusinessStore,
+    workflowCodex,
+    workflowReviewService,
     aiChat,
     dispatcher,
     server,
@@ -2583,6 +2642,7 @@ export function createTaskboardServer(options = {}) {
         : Promise.resolve();
       unsubscribeDispatcherEvents();
       await dispatcher.close();
+      await workflowReviewService.close();
       events.close();
       for (const response of aiEventResponses) response.end();
       aiEventResponses.clear();
