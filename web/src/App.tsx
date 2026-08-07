@@ -392,6 +392,7 @@ export function App() {
   const [boardView, setBoardView] = useState<BoardView>("issues");
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [codexHistorySyncOpen, setCodexHistorySyncOpen] = useState(false);
+  const [projectHomeMenuOpen, setProjectHomeMenuOpen] = useState(false);
   const [projectCreateOpen, setProjectCreateOpen] = useState(false);
   const [codexHistorySyncRequest, setCodexHistorySyncRequest] = useState(embedded ? 0 : 1);
   const [aiChatSyncRevision, setAiChatSyncRevision] = useState(0);
@@ -635,6 +636,26 @@ export function App() {
   useEffect(() => {
     tasksRef.current = tasks;
   }, [tasks]);
+
+  useEffect(() => {
+    if (!projectHomeMenuOpen) return;
+
+    function closeProjectHomeMenu(event: PointerEvent) {
+      const target = event.target as HTMLElement;
+      if (!target.closest("[data-project-home-menu]")) setProjectHomeMenuOpen(false);
+    }
+
+    function closeProjectHomeMenuWithEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setProjectHomeMenuOpen(false);
+    }
+
+    document.addEventListener("pointerdown", closeProjectHomeMenu);
+    window.addEventListener("keydown", closeProjectHomeMenuWithEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeProjectHomeMenu);
+      window.removeEventListener("keydown", closeProjectHomeMenuWithEscape);
+    };
+  }, [projectHomeMenuOpen]);
 
   useEffect(() => {
     if (!projectMenuOpen) return;
@@ -1889,15 +1910,35 @@ export function App() {
                   <LinearIcon name="folder" />
                   创建项目
                 </button>
-                <button
-                  type="button"
-                  className="button secondary project-history-sync"
-                  disabled={projects.length === 0}
-                  onClick={() => setCodexHistorySyncOpen(true)}
-                >
-                  <LinearIcon name="terminal" />
-                  同步 Codex 历史
-                </button>
+                <div className="project-home-menu" data-project-home-menu>
+                  <button
+                    type="button"
+                    className="project-home-menu-trigger"
+                    aria-label="更多操作"
+                    aria-haspopup="menu"
+                    aria-expanded={projectHomeMenuOpen}
+                    title="更多操作"
+                    onClick={() => setProjectHomeMenuOpen((current) => !current)}
+                  >
+                    <LinearIcon name="more" />
+                  </button>
+                  {projectHomeMenuOpen && (
+                    <div className="project-home-menu-popover" role="menu" aria-label="更多操作">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={projects.length === 0}
+                        onClick={() => {
+                          setProjectHomeMenuOpen(false);
+                          setCodexHistorySyncOpen(true);
+                        }}
+                      >
+                        <LinearIcon name="terminal" />
+                        <span>手动同步历史</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
             {projectsLoading ? (

@@ -488,14 +488,84 @@ kbd {
   letter-spacing: 0.06em;
 }
 
-.project-history-sync {
+.project-home-menu {
+  position: relative;
   flex: 0 0 auto;
-  margin-top: 3px;
 }
 
-.project-history-sync svg {
-  width: 14px;
-  height: 14px;
+.project-home-menu-trigger {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-tertiary);
+}
+
+.project-home-menu-trigger:hover,
+.project-home-menu-trigger:focus-visible,
+.project-home-menu-trigger[aria-expanded="true"] {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.project-home-menu-trigger:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.project-home-menu-trigger svg {
+  width: 16px;
+  height: 16px;
+}
+
+.project-home-menu-popover {
+  position: absolute;
+  z-index: 50;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 176px;
+  padding: 5px;
+  border: var(--border-hairline) solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  box-shadow: var(--dialog-shadow);
+  animation: context-menu-in 90ms ease-out both;
+}
+
+.project-home-menu-popover button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 32px;
+  gap: 8px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 11px;
+  text-align: left;
+}
+
+.project-home-menu-popover button:hover:not(:disabled),
+.project-home-menu-popover button:focus-visible {
+  background: var(--surface-hover);
+  outline: 0;
+}
+
+.project-home-menu-popover button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.project-home-menu-popover svg {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
 }
 
 .project-home-heading h1 {
@@ -9303,10 +9373,6 @@ kbd {
   .project-home-actions {
     align-items: flex-start;
     flex-wrap: wrap;
-  }
-
-  .project-history-sync {
-    align-self: flex-start;
   }
 
   .automatic-processing-menu {
