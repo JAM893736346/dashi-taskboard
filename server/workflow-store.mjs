@@ -813,6 +813,21 @@ export class WorkflowStore {
               AND workflow_node_runs.status = 'running'
           )
       `).run(claimedAt);
+      const activeCount = this.#statement(`
+        SELECT COUNT(*) AS count
+        FROM workflow_node_runs
+        WHERE run_id = ?
+          AND (
+            status = 'running'
+            OR (
+              status = 'ready'
+              AND lease_owner IS NOT NULL
+              AND lease_expires_at > ?
+            )
+          )
+      `).get(runId, claimedAt).count;
+      const claimLimit = Math.min(limit, Math.max(0, run.concurrency_limit - activeCount));
+      if (claimLimit === 0) return [];
       const candidates = this.#statement(`
         SELECT * FROM workflow_node_runs
         WHERE run_id = ? AND status = 'ready'
@@ -821,7 +836,7 @@ export class WorkflowStore {
       `).all(runId, claimedAt);
       const claimed = [];
       for (const candidate of candidates) {
-        if (claimed.length >= limit) break;
+        if (claimed.length >= claimLimit) break;
         const resources = parseJson(candidate.resources) ?? [];
         const compatible = resources.every((resource) => {
           const held = this.#statement(`
@@ -924,10 +939,13 @@ export class WorkflowStore {
     });
   }
 
-  startAttempt({ nodeRunId, threadId = null, turnId = null }) {
+  startAttempt({ nodeRunId, owner, threadId = null, turnId = null }) {
+    if (typeof owner !== "string" || owner.length === 0) {
+      throw new ApiError(400, "INVALID_WORKFLOW_LEASE", "Workflow lease owner is required");
+    }
     return this.#transaction(() => {
       const node = this.#statement(`
-        SELECT workflow_node_runs.*, workflow_runs.id AS workflow_run_id
+        SELECT workflow_node_runs.*, workflow_runs.status AS run_status
         FROM workflow_node_runs
         JOIN workflow_runs ON workflow_runs.id = workflow_node_runs.run_id
         WHERE workflow_node_runs.id = ?
@@ -943,12 +961,53 @@ export class WorkflowStore {
           { nodeRunId, status: node.status },
         );
       }
+      if (node.run_status !== "queued" && node.run_status !== "running") {
+        throw new ApiError(
+          409,
+          "WORKFLOW_RUN_STATE_CONFLICT",
+          "Workflow run is not active for a new attempt",
+          { nodeRunId, runId: node.run_id, runStatus: node.run_status },
+        );
+      }
+      const timestamp = now();
+      if (node.lease_owner !== owner || node.lease_expires_at === null || node.lease_expires_at <= timestamp) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_LEASE_LOST",
+          "Workflow node lease is not live for this scheduler",
+          {
+            nodeRunId,
+            owner,
+            actualOwner: node.lease_owner,
+            leaseExpiresAt: node.lease_expires_at,
+          },
+        );
+      }
+      const resources = parseJson(node.resources) ?? [];
+      const leases = this.#statement(`
+        SELECT resource_key, mode, owner, expires_at
+        FROM workflow_resource_leases WHERE node_run_id = ?
+      `).all(nodeRunId);
+      const leasesByKey = new Map(leases.map((lease) => [lease.resource_key, lease]));
+      const resourcesOwned = resources.every((resource) => {
+        const lease = leasesByKey.get(resource.key);
+        return lease?.mode === resource.mode
+          && lease.owner === owner
+          && lease.expires_at > timestamp;
+      });
+      if (!resourcesOwned) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_LEASE_LOST",
+          "Workflow resource leases are not live for this scheduler",
+          { nodeRunId, owner },
+        );
+      }
       const attemptNumber = this.#statement(`
         SELECT COALESCE(MAX(attempt_number), 0) + 1 AS attempt_number
         FROM workflow_node_attempts WHERE node_run_id = ?
       `).get(nodeRunId).attempt_number;
       const id = randomUUID();
-      const timestamp = now();
       const idempotencyKey = `${node.run_id}:${node.definition_id}:${attemptNumber}:${node.executor_version}`;
       this.#statement(`
         INSERT INTO workflow_node_attempts (
@@ -959,8 +1018,9 @@ export class WorkflowStore {
       this.#statement(`
         UPDATE workflow_node_runs
         SET status = 'running', active_attempt_id = ?, version = version + 1, updated_at = ?
-        WHERE id = ?
-      `).run(id, timestamp, nodeRunId);
+        WHERE id = ? AND status = 'ready' AND active_attempt_id IS NULL
+          AND lease_owner = ? AND lease_expires_at > ?
+      `).run(id, timestamp, nodeRunId, owner, timestamp);
       return attemptFromRow(this.#attemptRow(id));
     });
   }
@@ -1102,76 +1162,164 @@ export class WorkflowStore {
   }
 
   upsertSubagent(input) {
-    this.#ensureOpen();
-    const existing = this.#statement(`
-      SELECT * FROM workflow_subagents WHERE thread_id = ?
-    `).get(input.threadId);
-    const id = existing?.id ?? input.id ?? randomUUID();
-    const timestamp = now();
-    const nodeRunId = input.nodeRunId ?? existing?.node_run_id;
-    const attemptId = input.attemptId ?? existing?.attempt_id;
-    const parentThreadId = input.parentThreadId ?? existing?.parent_thread_id;
-    const status = input.status ?? existing?.status;
-    const role = input.role === undefined ? existing?.role ?? null : input.role;
-    const model = input.model === undefined ? existing?.model ?? null : input.model;
-    const activity = input.activity === undefined
-      ? existing?.activity ?? null
-      : input.activity === null ? null : json(input.activity);
-    const result = input.result === undefined
-      ? existing?.result ?? null
-      : input.result === null ? null : json(input.result);
-    this.#statement(`
-      INSERT INTO workflow_subagents (
-        id, node_run_id, attempt_id, thread_id, parent_thread_id,
-        role, model, status, activity, result, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(thread_id) DO UPDATE SET
-        node_run_id = excluded.node_run_id,
-        attempt_id = excluded.attempt_id,
-        parent_thread_id = excluded.parent_thread_id,
-        role = excluded.role,
-        model = excluded.model,
-        status = excluded.status,
-        activity = excluded.activity,
-        result = excluded.result,
-        updated_at = excluded.updated_at
-    `).run(
-      id,
-      nodeRunId,
-      attemptId,
-      input.threadId,
-      parentThreadId,
-      role,
-      model,
-      status,
-      activity,
-      result,
-      input.createdAt ?? timestamp,
-      timestamp,
-    );
-    return subagentFromRow(this.#statement("SELECT * FROM workflow_subagents WHERE thread_id = ?").get(input.threadId));
+    if (typeof input.threadId !== "string" || input.threadId.length === 0) {
+      throw new ApiError(
+        400,
+        "INVALID_WORKFLOW_SUBAGENT_IDENTITY",
+        "Workflow Subagent identity fields are required",
+      );
+    }
+    return this.#transaction(() => {
+      const existing = this.#statement(`
+        SELECT * FROM workflow_subagents WHERE thread_id = ?
+      `).get(input.threadId);
+      const timestamp = now();
+      if (existing) {
+        const identityFields = [
+          ["nodeRunId", "node_run_id"],
+          ["attemptId", "attempt_id"],
+          ["parentThreadId", "parent_thread_id"],
+        ];
+        const changedIdentity = identityFields.find(
+          ([inputKey, rowKey]) => Object.hasOwn(input, inputKey) && input[inputKey] !== existing[rowKey],
+        );
+        if (changedIdentity) {
+          throw new ApiError(
+            409,
+            "WORKFLOW_SUBAGENT_IDENTITY_CONFLICT",
+            "Workflow Subagent identity cannot be changed",
+            {
+              threadId: input.threadId,
+              field: changedIdentity[0],
+              expectedValue: existing[changedIdentity[1]],
+              actualValue: input[changedIdentity[0]],
+            },
+          );
+        }
+        this.#statement(`
+          UPDATE workflow_subagents
+          SET role = ?, model = ?, status = ?, activity = ?, result = ?, updated_at = ?
+          WHERE thread_id = ?
+        `).run(
+          input.role === undefined ? existing.role : input.role,
+          input.model === undefined ? existing.model : input.model,
+          input.status ?? existing.status,
+          input.activity === undefined
+            ? existing.activity
+            : input.activity === null ? null : json(input.activity),
+          input.result === undefined
+            ? existing.result
+            : input.result === null ? null : json(input.result),
+          timestamp,
+          input.threadId,
+        );
+      } else {
+        const identity = [input.nodeRunId, input.attemptId, input.parentThreadId];
+        if (identity.some((value) => typeof value !== "string" || value.length === 0)) {
+          throw new ApiError(
+            400,
+            "INVALID_WORKFLOW_SUBAGENT_IDENTITY",
+            "Workflow Subagent identity fields are required",
+          );
+        }
+        this.#statement(`
+          INSERT INTO workflow_subagents (
+            id, node_run_id, attempt_id, thread_id, parent_thread_id,
+            role, model, status, activity, result, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          input.id ?? randomUUID(),
+          input.nodeRunId,
+          input.attemptId,
+          input.threadId,
+          input.parentThreadId,
+          input.role ?? null,
+          input.model ?? null,
+          input.status,
+          input.activity === undefined || input.activity === null ? null : json(input.activity),
+          input.result === undefined || input.result === null ? null : json(input.result),
+          input.createdAt ?? timestamp,
+          timestamp,
+        );
+      }
+      return subagentFromRow(
+        this.#statement("SELECT * FROM workflow_subagents WHERE thread_id = ?").get(input.threadId),
+      );
+    });
   }
 
-  finishTurn({ attemptId, status, candidateResult, error }) {
-    this.#ensureOpen();
-    const assignments = ["status = ?", "turn_id = NULL", "finished_at = ?"];
-    const values = [status, status === "running" ? null : now()];
-    if (candidateResult !== undefined) {
-      assignments.push("candidate_result = ?");
-      values.push(candidateResult === null ? null : json(candidateResult));
+  finishTurn({ attemptId, expectedTurnId, status, candidateResult, error }) {
+    if (typeof expectedTurnId !== "string" || expectedTurnId.length === 0) {
+      throw new ApiError(400, "INVALID_WORKFLOW_TURN", "Expected workflow turn ID is required");
     }
-    if (error !== undefined) {
-      assignments.push("error = ?");
-      values.push(error === null ? null : json(error));
-    }
-    values.push(attemptId);
-    const result = this.#statement(`
-      UPDATE workflow_node_attempts SET ${assignments.join(", ")} WHERE id = ?
-    `).run(...values);
-    if (result.changes !== 1) {
-      throw new ApiError(404, "WORKFLOW_ATTEMPT_NOT_FOUND", `Workflow attempt '${attemptId}' does not exist`);
-    }
-    return attemptFromRow(this.#attemptRow(attemptId));
+    return this.#transaction(() => {
+      const attempt = this.#statement(`
+        SELECT
+          workflow_node_attempts.*,
+          workflow_node_runs.status AS node_status,
+          workflow_node_runs.active_attempt_id
+        FROM workflow_node_attempts
+        JOIN workflow_node_runs ON workflow_node_runs.id = workflow_node_attempts.node_run_id
+        WHERE workflow_node_attempts.id = ?
+      `).get(attemptId);
+      if (!attempt) {
+        throw new ApiError(404, "WORKFLOW_ATTEMPT_NOT_FOUND", `Workflow attempt '${attemptId}' does not exist`);
+      }
+      if (attempt.status !== "running") {
+        if (attempt.status === status) return attemptFromRow(attempt);
+        throw new ApiError(
+          409,
+          "WORKFLOW_ATTEMPT_STATE_CONFLICT",
+          "Workflow attempt is already terminal with another status",
+          { attemptId, expectedStatus: status, actualStatus: attempt.status },
+        );
+      }
+      if (attempt.node_status !== "running" || attempt.active_attempt_id !== attemptId) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_ATTEMPT_STATE_CONFLICT",
+          "Only the current active running attempt can finish a turn",
+          {
+            attemptId,
+            nodeStatus: attempt.node_status,
+            activeAttemptId: attempt.active_attempt_id,
+          },
+        );
+      }
+      if (attempt.turn_id !== expectedTurnId) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_ATTEMPT_TURN_CONFLICT",
+          "Workflow turn changed before completion",
+          { attemptId, expectedTurnId, actualTurnId: attempt.turn_id },
+        );
+      }
+
+      const assignments = ["status = ?", "turn_id = NULL", "finished_at = ?"];
+      const values = [status, status === "running" ? null : now()];
+      if (candidateResult !== undefined) {
+        assignments.push("candidate_result = ?");
+        values.push(candidateResult === null ? null : json(candidateResult));
+      }
+      if (error !== undefined) {
+        assignments.push("error = ?");
+        values.push(error === null ? null : json(error));
+      }
+      values.push(attemptId, expectedTurnId);
+      const result = this.#statement(`
+        UPDATE workflow_node_attempts SET ${assignments.join(", ")}
+        WHERE id = ? AND status = 'running' AND turn_id = ?
+      `).run(...values);
+      if (result.changes !== 1) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_ATTEMPT_TURN_CONFLICT",
+          "Workflow turn changed before completion",
+          { attemptId, expectedTurnId },
+        );
+      }
+      return attemptFromRow(this.#attemptRow(attemptId));
+    });
   }
 
   completeNodeIfBarrierSatisfied(nodeRunId) {
