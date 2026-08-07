@@ -28,4 +28,11 @@ Use `taskctl` for every project, issue, and comment operation. Read [references/
 9. Move an issue from `in_review` to `done` only when the user explicitly confirms acceptance or explicitly asks to mark it complete. Codex self-verification alone is not sufficient.
 10. Move work that cannot continue to `blocked`, and work that will not continue to `canceled`.
 
+## Workflow Chat Messages
+
+Agents may use `taskctl workflow message` only when a handoff explicitly provides the target
+workflow node/run. The command appends a queued message to that formal Chat with source
+attribution. It cannot steer another active Chat and it cannot create a formal workflow node;
+formal follow-up work must be added through a user-authorized workflow amendment.
+
 For version conflicts outside the initial claim, read the issue again, reconcile the newer state, and retry with its current version.

@@ -149,3 +149,16 @@ taskctl attachment download ATTACHMENT_ID --output PATH [--json]
 ```
 
 The command writes the response body as binary data and returns the absolute output path, content type, and size in its JSON result. Choose the output filename yourself; `taskctl` does not infer or append an extension.
+
+## Queue a workflow Chat message
+
+Use this command only when the current handoff explicitly names the target workflow node/run:
+
+```bash
+taskctl workflow message NODE_RUN_ID --body TEXT [--thread-id ID] [--json]
+```
+
+The source Chat comes from `--thread-id` or `CODEX_THREAD_ID` and must belong to the same
+workflow run as the target. Agent messages are always queued FIFO for a later turn in the
+target's existing formal Chat. This command cannot immediately steer the target Chat or create
+a new formal task.

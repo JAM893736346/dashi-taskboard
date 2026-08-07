@@ -1310,6 +1310,50 @@ export class WorkflowStore {
           `Workflow node run '${targetNodeRunId}' does not exist`,
         );
       }
+      if (!NONTERMINAL_NODE_STATUSES.includes(node.status)) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_NODE_TERMINAL",
+          "A terminal workflow node cannot accept another Chat message",
+          { targetNodeRunId, status: node.status, formalTaskRequired: true },
+        );
+      }
+      if (node.type !== "codex-thread" || node.status !== "running" || node.active_attempt_id === null) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_NODE_NOT_RUNNING",
+          "Workflow Chat messages require a running formal Chat",
+          { targetNodeRunId, status: node.status },
+        );
+      }
+      const attempt = this.#attemptRow(node.active_attempt_id);
+      if (!attempt || attempt.status !== "running" || attempt.thread_id === null) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_ATTEMPT_STATE_CONFLICT",
+          "Workflow Chat messages require a bound running attempt",
+          { targetNodeRunId, attemptId: node.active_attempt_id },
+        );
+      }
+      if (mode === "steer" && (attempt.turn_id === null || attempt.turn_id !== expectedTurnId)) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_TURN_NOT_ACTIVE",
+          "Immediate guidance requires the current active turn",
+          { targetNodeRunId, expectedTurnId, actualTurnId: attempt.turn_id },
+        );
+      }
+      if (sourceType === "agent") {
+        const source = sourceNodeRunId === null ? null : this.#nodeRunRow(sourceNodeRunId);
+        if (!source || source.run_id !== node.run_id) {
+          throw new ApiError(
+            403,
+            "WORKFLOW_MESSAGE_SOURCE_INVALID",
+            "Agent workflow messages must originate from a formal Chat in the same run",
+            { targetNodeRunId, sourceNodeRunId },
+          );
+        }
+      }
       const sequence = this.#statement(`
         SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence
         FROM workflow_inbox_messages WHERE target_node_run_id = ?
@@ -1344,15 +1388,167 @@ export class WorkflowStore {
       ? this.#statement(`
           UPDATE workflow_inbox_messages
           SET mode = 'queued', status = 'fallback_queued', delivered_at = NULL
-          WHERE id = ?
+          WHERE id = ? AND mode = 'steer' AND status = 'pending'
         `).run(id)
       : this.#statement(`
-          UPDATE workflow_inbox_messages SET status = ?, delivered_at = ? WHERE id = ?
+          UPDATE workflow_inbox_messages SET status = ?, delivered_at = ?
+          WHERE id = ? AND mode = 'steer' AND status = 'pending'
         `).run(status, deliveredAt, id);
-    if (result.changes !== 1) {
+    if (result.changes !== 1 && !this.#inboxRow(id)) {
       throw new ApiError(404, "WORKFLOW_INBOX_NOT_FOUND", `Workflow inbox message '${id}' does not exist`);
     }
     return inboxMessageFromRow(this.#inboxRow(id));
+  }
+
+  fallbackPendingSteers(nodeRunId, expectedTurnId) {
+    return this.#transaction(() => {
+      const messages = this.#statement(`
+        SELECT * FROM workflow_inbox_messages
+        WHERE target_node_run_id = ? AND mode = 'steer' AND status = 'pending'
+          AND expected_turn_id = ?
+        ORDER BY sequence
+      `).all(nodeRunId, expectedTurnId);
+      if (messages.length === 0) return [];
+      this.#statement(`
+        UPDATE workflow_inbox_messages
+        SET mode = 'queued', status = 'fallback_queued', delivered_at = NULL
+        WHERE target_node_run_id = ? AND expected_turn_id = ?
+          AND mode = 'steer' AND status = 'pending'
+      `).run(nodeRunId, expectedTurnId);
+      return messages.map((message) => inboxMessageFromRow(this.#inboxRow(message.id)));
+    });
+  }
+
+  findMessageSource({ targetNodeRunId, sourceThreadId }) {
+    this.#ensureOpen();
+    const target = this.#nodeRunRow(targetNodeRunId);
+    if (!target) {
+      throw new ApiError(
+        404,
+        "WORKFLOW_NODE_NOT_FOUND",
+        `Workflow node run '${targetNodeRunId}' does not exist`,
+      );
+    }
+    const source = this.#statement(`
+      SELECT workflow_node_runs.id AS node_run_id, workflow_node_runs.run_id
+      FROM workflow_node_attempts
+      JOIN workflow_node_runs ON workflow_node_runs.id = workflow_node_attempts.node_run_id
+      WHERE workflow_node_attempts.thread_id = ?
+      ORDER BY workflow_node_attempts.started_at DESC, workflow_node_attempts.rowid DESC
+      LIMIT 1
+    `).get(sourceThreadId);
+    if (!source || source.run_id !== target.run_id) {
+      throw new ApiError(
+        403,
+        "WORKFLOW_MESSAGE_SOURCE_INVALID",
+        "The source Chat is not part of the target workflow run",
+        { targetNodeRunId, sourceThreadId },
+      );
+    }
+    return { nodeRunId: source.node_run_id, runId: source.run_id };
+  }
+
+  prepareQueuedTurn({ attemptId, messageId }) {
+    return this.#transaction(() => {
+      const attempt = this.#attemptRow(attemptId);
+      if (!attempt) {
+        throw new ApiError(404, "WORKFLOW_ATTEMPT_NOT_FOUND", `Workflow attempt '${attemptId}' does not exist`);
+      }
+      const node = this.#nodeRunRow(attempt.node_run_id);
+      const message = this.#inboxRow(messageId);
+      const next = this.#statement(`
+        SELECT id FROM workflow_inbox_messages
+        WHERE target_node_run_id = ? AND mode = 'queued'
+          AND status IN ('pending', 'fallback_queued')
+        ORDER BY sequence LIMIT 1
+      `).get(node.id);
+      if (
+        attempt.status !== "running"
+        || node.status !== "running"
+        || node.active_attempt_id !== attemptId
+        || attempt.thread_id === null
+        || attempt.turn_id !== null
+        || !message
+        || message.target_node_run_id !== node.id
+        || next?.id !== messageId
+      ) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_INBOX_STATE_CONFLICT",
+          "Only the first queued message can start on the idle active attempt",
+          { attemptId, messageId },
+        );
+      }
+      this.#statement(`
+        UPDATE workflow_node_attempts SET candidate_result = NULL
+        WHERE id = ? AND status = 'running' AND turn_id IS NULL
+      `).run(attemptId);
+      this.#statement(`
+        UPDATE workflow_inbox_messages SET expected_turn_id = ?
+        WHERE id = ? AND status IN ('pending', 'fallback_queued')
+      `).run(attempt.last_finished_turn_id, messageId);
+      return {
+        attempt: attemptFromRow(this.#attemptRow(attemptId)),
+        message: inboxMessageFromRow(this.#inboxRow(messageId)),
+      };
+    });
+  }
+
+  bindQueuedTurn({ attemptId, messageId, threadId, turnId }) {
+    return this.#transaction(() => {
+      const attempt = this.#attemptRow(attemptId);
+      const message = this.#inboxRow(messageId);
+      if (!attempt || !message) {
+        throw new ApiError(
+          404,
+          "WORKFLOW_INBOX_NOT_FOUND",
+          `Workflow queued message '${messageId}' does not exist`,
+        );
+      }
+      const node = this.#nodeRunRow(attempt.node_run_id);
+      if (
+        attempt.status === "running"
+        && node.status === "running"
+        && node.active_attempt_id === attemptId
+        && attempt.thread_id === threadId
+        && attempt.turn_id === turnId
+        && message.target_node_run_id === node.id
+        && message.mode === "queued"
+        && message.status === "delivered"
+      ) {
+        return { attempt: attemptFromRow(attempt), message: inboxMessageFromRow(message) };
+      }
+      if (
+        attempt.status !== "running"
+        || node.status !== "running"
+        || node.active_attempt_id !== attemptId
+        || attempt.thread_id !== threadId
+        || (attempt.turn_id !== null && attempt.turn_id !== turnId)
+        || message.target_node_run_id !== node.id
+        || message.mode !== "queued"
+        || !["pending", "fallback_queued"].includes(message.status)
+      ) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_INBOX_STATE_CONFLICT",
+          "Workflow queued turn changed before it could be bound",
+          { attemptId, messageId, threadId, turnId },
+        );
+      }
+      this.#statement(`
+        UPDATE workflow_node_attempts SET turn_id = ?
+        WHERE id = ? AND status = 'running' AND (turn_id IS NULL OR turn_id = ?)
+      `).run(turnId, attemptId, turnId);
+      this.#statement(`
+        UPDATE workflow_inbox_messages
+        SET status = 'delivered', delivered_at = ?
+        WHERE id = ? AND status IN ('pending', 'fallback_queued')
+      `).run(now(), messageId);
+      return {
+        attempt: attemptFromRow(this.#attemptRow(attemptId)),
+        message: inboxMessageFromRow(this.#inboxRow(messageId)),
+      };
+    });
   }
 
   peekQueuedMessage(nodeRunId) {
@@ -1847,6 +2043,28 @@ export class WorkflowStore {
           { nodeRunId, status: node.status },
         );
       }
+      const run = this.#runRow(node.run_id);
+      if (!["queued", "running", "paused", "failed"].includes(run.status)) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_RUN_STATE_CONFLICT",
+          "Workflow run cannot be reopened for this retry",
+          { nodeRunId, runId: run.id, runStatus: run.status },
+        );
+      }
+      const active = this.#statement(`
+        SELECT id, status FROM workflow_runs
+        WHERE task_id = ? AND id <> ? AND status IN ('queued', 'running', 'paused')
+        ORDER BY created_at DESC, rowid DESC LIMIT 1
+      `).get(run.task_id, run.id);
+      if (active) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_RUN_ACTIVE",
+          "This Issue already has an active workflow run",
+          { runId: active.id, status: active.status },
+        );
+      }
       const timestamp = now();
       this.#statement("DELETE FROM workflow_resource_leases WHERE node_run_id = ?").run(nodeRunId);
       this.#statement(`
@@ -1856,6 +2074,103 @@ export class WorkflowStore {
             version = version + 1, updated_at = ?
         WHERE id = ?
       `).run(timestamp, nodeRunId);
+      if (run.status === "paused" || run.status === "failed") {
+        this.#statement(`
+          UPDATE workflow_runs
+          SET status = 'queued', finished_at = NULL,
+              version = version + 1, updated_at = ?
+          WHERE id = ? AND status = ?
+        `).run(timestamp, run.id, run.status);
+      }
+      return nodeRunFromRow(this.#nodeRunRow(nodeRunId));
+    });
+  }
+
+  cancelNode(nodeRunId, details = { reason: "user_cancelled" }) {
+    return this.#transaction(() => {
+      const node = this.#nodeRunRow(nodeRunId);
+      if (!node) {
+        throw new ApiError(404, "WORKFLOW_NODE_NOT_FOUND", `Workflow node run '${nodeRunId}' does not exist`);
+      }
+      if (!NONTERMINAL_NODE_STATUSES.includes(node.status)) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_NODE_STATE_CONFLICT",
+          "Workflow node cannot be cancelled from its current state",
+          { nodeRunId, actualStatus: node.status },
+        );
+      }
+      const timestamp = now();
+      if (node.status === "running" && node.active_attempt_id !== null) {
+        const attempt = this.#attemptRow(node.active_attempt_id);
+        if (!attempt || attempt.status !== "running") {
+          throw new ApiError(
+            409,
+            "WORKFLOW_ATTEMPT_STATE_CONFLICT",
+            "Workflow node has no cancellable active attempt",
+            { nodeRunId, attemptId: node.active_attempt_id },
+          );
+        }
+        if (
+          details.attemptId !== attempt.id
+          || details.threadId !== attempt.thread_id
+          || !Object.hasOwn(details, "turnId")
+          || details.turnId !== attempt.turn_id
+        ) {
+          throw new ApiError(
+            409,
+            "WORKFLOW_ATTEMPT_STATE_CONFLICT",
+            "Workflow cancellation no longer matches the active attempt",
+            {
+              nodeRunId,
+              expectedAttemptId: details.attemptId ?? null,
+              actualAttemptId: attempt.id,
+              expectedThreadId: details.threadId ?? null,
+              actualThreadId: attempt.thread_id,
+              expectedTurnId: Object.hasOwn(details, "turnId") ? details.turnId : null,
+              actualTurnId: attempt.turn_id,
+            },
+          );
+        }
+        const result = this.#statement(`
+          UPDATE workflow_node_attempts
+          SET status = 'cancelled', turn_id = NULL,
+              last_finished_turn_id = COALESCE(turn_id, last_finished_turn_id),
+              last_finished_status = 'cancelled',
+              last_finished_error_present = 1,
+              last_finished_error = ?, error = ?, finished_at = ?
+          WHERE id = ? AND status = 'running'
+            AND thread_id IS ? AND turn_id IS ?
+        `).run(
+          json(details),
+          json(details),
+          timestamp,
+          attempt.id,
+          details.threadId,
+          details.turnId,
+        );
+        if (result.changes !== 1) {
+          throw new ApiError(
+            409,
+            "WORKFLOW_ATTEMPT_STATE_CONFLICT",
+            "Workflow cancellation lost the active attempt race",
+            { nodeRunId, attemptId: attempt.id },
+          );
+        }
+      }
+      this.#statement("DELETE FROM workflow_resource_leases WHERE node_run_id = ?").run(nodeRunId);
+      this.#statement(`
+        UPDATE workflow_inbox_messages
+        SET status = 'cancelled', delivered_at = NULL
+        WHERE target_node_run_id = ? AND status IN ('pending', 'fallback_queued')
+      `).run(nodeRunId);
+      this.#statement(`
+        UPDATE workflow_node_runs
+        SET status = 'cancelled', result = ?,
+            lease_owner = NULL, lease_expires_at = NULL,
+            version = version + 1, updated_at = ?
+        WHERE id = ? AND status IN ('blocked', 'ready', 'running', 'awaiting_confirmation')
+      `).run(json(details), timestamp, nodeRunId);
       return nodeRunFromRow(this.#nodeRunRow(nodeRunId));
     });
   }
@@ -1909,8 +2224,17 @@ export class WorkflowStore {
 
   createAmendment(input) {
     return this.#transaction(() => {
-      if (!this.#runRow(input.runId)) {
+      const run = this.#runRow(input.runId);
+      if (!run) {
         throw new ApiError(404, "WORKFLOW_RUN_NOT_FOUND", `Workflow run '${input.runId}' does not exist`);
+      }
+      if (!ACTIVE_RUN_STATUSES.includes(run.status)) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_RUN_STATE_CONFLICT",
+          "Workflow amendments can only be created for an active run",
+          { runId: input.runId, runStatus: run.status },
+        );
       }
       const revision = this.#statement(`
         SELECT COALESCE(MAX(revision), 0) + 1 AS revision
@@ -1937,6 +2261,50 @@ export class WorkflowStore {
       );
       return amendmentFromRow(this.#amendmentRow(id));
     });
+  }
+
+  getAmendment(id) {
+    this.#ensureOpen();
+    return amendmentFromRow(this.#amendmentRow(id));
+  }
+
+  updateAmendment(id, expectedStatuses, changes) {
+    if (!Array.isArray(expectedStatuses) || expectedStatuses.length === 0) {
+      throw new TypeError("expectedStatuses must contain at least one status");
+    }
+    const columns = {
+      status: ["status", (value) => value],
+      patch: ["patch", json],
+      reviewReport: ["review_report", (value) => value === null ? null : json(value)],
+      reviewerThreadId: ["reviewer_thread_id", (value) => value],
+    };
+    const assignments = [];
+    const values = [];
+    for (const [key, [column, serialize]] of Object.entries(columns)) {
+      if (!Object.hasOwn(changes, key)) continue;
+      assignments.push(`${column} = ?`);
+      values.push(serialize(changes[key]));
+    }
+    assignments.push("updated_at = ?");
+    values.push(now(), id, ...expectedStatuses);
+    const placeholders = expectedStatuses.map(() => "?").join(", ");
+    const result = this.#statement(`
+      UPDATE workflow_run_amendments SET ${assignments.join(", ")}
+      WHERE id = ? AND status IN (${placeholders})
+    `).run(...values);
+    if (result.changes !== 1) {
+      const current = this.#amendmentRow(id);
+      if (!current) {
+        throw new ApiError(404, "WORKFLOW_AMENDMENT_NOT_FOUND", `Workflow amendment '${id}' does not exist`);
+      }
+      throw new ApiError(
+        409,
+        "WORKFLOW_AMENDMENT_STATE_CONFLICT",
+        "Workflow amendment state changed before the update",
+        { amendmentId: id, expectedStatuses, actualStatus: current.status },
+      );
+    }
+    return amendmentFromRow(this.#amendmentRow(id));
   }
 
   applyAmendment(amendmentId) {

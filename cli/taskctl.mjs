@@ -76,6 +76,7 @@ const COMMAND_OPTIONS = new Map([
   ["comment update", new Set(["body", "thread-id", "if-version", "json"])],
   ["comment delete", new Set(["thread-id", "if-version", "json"])],
   ["attachment download", new Set(["output", "json"])],
+  ["workflow message", new Set(["body", "thread-id", "json"])],
   ["context current", new Set(["cwd", "json"])],
 ]);
 
@@ -179,13 +180,15 @@ async function execute(parsed, overrides) {
   const allowedOptions = COMMAND_OPTIONS.get(command);
   if (!allowedOptions) {
     throw usageError(
-      "Expected one of: project list/create/map, cloud login/status/logout, issue list/get/create/update/move/archive/restore/relation, comment list/add/update/delete, attachment download, context current",
+      "Expected one of: project list/create/map, cloud login/status/logout, issue list/get/create/update/move/archive/restore/relation, comment list/add/update/delete, attachment download, workflow message, context current",
     );
   }
   validateOptions(parsed.options, allowedOptions);
 
   const env = overrides.env ?? process.env;
-  const usesCompanionControl = command.startsWith("cloud ") || command === "project map";
+  const usesCompanionControl = command.startsWith("cloud ")
+    || command === "project map"
+    || command === "workflow message";
   const api = createApiClient(overrides, {
     baseUrl: usesCompanionControl || env.CODEX_TASKBOARD_COMPANION_URL !== undefined
       ? resolveCompanionUrl(env)
@@ -288,6 +291,17 @@ async function execute(parsed, overrides) {
     case "attachment download":
       expectOperandCount(parsed, 1);
       return downloadAttachment(api, parsed.operands[0], parsed.options, overrides);
+    case "workflow message":
+      expectOperandCount(parsed, 1);
+      return api.request(
+        "POST",
+        `/api/local/workflow/nodes/${encodeURIComponent(parsed.operands[0])}/messages`,
+        {
+          mode: "queued",
+          content: requiredOption(parsed.options, "body"),
+          sourceThreadId: resolveThreadId(parsed.options, overrides),
+        },
+      );
     case "context current":
       expectOperandCount(parsed, 0);
       return currentContext(api, parsed.options, overrides);

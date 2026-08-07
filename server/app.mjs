@@ -497,10 +497,65 @@ function parseWorkflowNodeControl(body) {
   assertPlainObject(body);
   assertAllowedKeys(body, new Set(["action"]));
   const action = stringField(body.action, "action", { required: true, maxLength: 32 });
-  if (!new Set(["approve", "reject", "cancel"]).has(action)) {
-    throw new ApiError(400, "INVALID_FIELD", "'action' must be approve, reject, or cancel");
+  if (!new Set(["approve", "reject", "interrupt", "retry", "cancel"]).has(action)) {
+    throw new ApiError(
+      400,
+      "INVALID_FIELD",
+      "'action' must be approve, reject, interrupt, retry, or cancel",
+    );
   }
   return action;
+}
+
+function parseWorkflowNodeMessage(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["mode", "content", "sourceThreadId"]));
+  const mode = stringField(body.mode, "mode", { required: true, maxLength: 16 });
+  if (mode !== "steer" && mode !== "queued") {
+    throw new ApiError(400, "INVALID_FIELD", "'mode' must be steer or queued");
+  }
+  return {
+    mode,
+    content: stringField(body.content, "content", { required: true, maxLength: 100_000 }),
+    sourceThreadId: stringField(body.sourceThreadId ?? null, "sourceThreadId", {
+      nullable: true,
+      maxLength: 256,
+    }),
+  };
+}
+
+function parseWorkflowAmendment(body) {
+  assertPlainObject(body);
+  const source = stringField(body.source, "source", { required: true, maxLength: 32 });
+  if (source === "user_configured") {
+    assertAllowedKeys(body, new Set(["source", "node"]));
+    assertPlainObject(body.node);
+    return { source, node: body.node };
+  }
+  if (source === "codex_generated") {
+    assertAllowedKeys(body, new Set(["source", "prompt", "dependsOn"]));
+    if (!Array.isArray(body.dependsOn) || body.dependsOn.length > 200) {
+      throw new ApiError(400, "INVALID_FIELD", "'dependsOn' must be an array with at most 200 node IDs");
+    }
+    const dependsOn = body.dependsOn.map((value, index) => stringField(
+      value,
+      `dependsOn[${index}]`,
+      { required: true, maxLength: 256 },
+    ));
+    if (new Set(dependsOn).size !== dependsOn.length) {
+      throw new ApiError(400, "INVALID_FIELD", "'dependsOn' must contain unique node IDs");
+    }
+    return {
+      source,
+      prompt: stringField(body.prompt, "prompt", { required: true, maxLength: 100_000 }),
+      dependsOn,
+    };
+  }
+  throw new ApiError(
+    400,
+    "INVALID_FIELD",
+    "'source' must be user_configured or codex_generated",
+  );
 }
 
 function parseSortOrder(value) {
@@ -653,6 +708,14 @@ function actorFromRequest(request) {
     avatarUrl = parsed.toString();
   }
   return { type: "user", id, name, avatarUrl };
+}
+
+function workflowUserActorFromRequest(request) {
+  const actor = actorFromRequest(request);
+  if (actor.type !== "user") {
+    throw new ApiError(403, "WORKFLOW_USER_REQUIRED", "This workflow action requires a user actor");
+  }
+  return actor;
 }
 
 function parseAssigneeTarget(value) {
@@ -2136,12 +2199,69 @@ export function createTaskboardServer(options = {}) {
         return sendJson(response, 200, { snapshot: workflowOrchestrator.getRunSnapshot(runId) });
       }
 
+      const workflowRunAmendmentRoute = pathname.match(
+        /^\/api\/local\/workflow\/runs\/([^/]+)\/amendments$/,
+      );
+      if (workflowRunAmendmentRoute) {
+        assertLoopbackRequest(request);
+        assertNoQuery(url.searchParams, "Workflow run amendment");
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        workflowUserActorFromRequest(request);
+        const runId = decodeRouteSegment(workflowRunAmendmentRoute[1], "Workflow run id");
+        const input = parseWorkflowAmendment(await readJson(request));
+        const amendment = await workflowOrchestrator.createAmendment(runId, input);
+        return sendJson(response, input.source === "codex_generated" ? 202 : 201, { amendment });
+      }
+
+      const workflowAmendmentApplyRoute = pathname.match(
+        /^\/api\/local\/workflow\/amendments\/([^/]+)\/apply$/,
+      );
+      if (workflowAmendmentApplyRoute) {
+        assertLoopbackRequest(request);
+        assertNoQuery(url.searchParams, "Workflow amendment apply");
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        workflowUserActorFromRequest(request);
+        await assertEmptyRequestBody(request, "POST /api/local/workflow/amendments/:id/apply");
+        const amendmentId = decodeRouteSegment(workflowAmendmentApplyRoute[1], "Workflow amendment id");
+        const snapshot = await workflowOrchestrator.applyAmendment(amendmentId);
+        return sendJson(response, 200, { snapshot });
+      }
+
+      const workflowNodeMessageRoute = pathname.match(
+        /^\/api\/local\/workflow\/nodes\/([^/]+)\/messages$/,
+      );
+      if (workflowNodeMessageRoute) {
+        assertLoopbackRequest(request);
+        assertNoQuery(url.searchParams, "Workflow node message");
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const nodeRunId = decodeRouteSegment(workflowNodeMessageRoute[1], "Workflow node run id");
+        const input = parseWorkflowNodeMessage(await readJson(request));
+        const actor = actorFromRequest(request);
+        if (requestHeader(request, "x-taskboard-client") === "taskctl") {
+          if (!input.sourceThreadId) {
+            throw new ApiError(
+              400,
+              "WORKFLOW_SOURCE_THREAD_REQUIRED",
+              "taskctl workflow messages require sourceThreadId",
+            );
+          }
+          input.mode = "queued";
+        }
+        const result = await workflowOrchestrator.submitNodeInput(nodeRunId, {
+          ...input,
+          actor,
+        });
+        return sendJson(response, 201, result);
+      }
+
       const workflowNodeControlRoute = pathname.match(
         /^\/api\/local\/workflow\/nodes\/([^/]+)\/control$/,
       );
       if (workflowNodeControlRoute) {
+        assertLoopbackRequest(request);
         assertNoQuery(url.searchParams, "Workflow node control");
         if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        workflowUserActorFromRequest(request);
         const nodeRunId = decodeRouteSegment(workflowNodeControlRoute[1], "Workflow node run id");
         const action = parseWorkflowNodeControl(await readJson(request));
         const snapshot = await workflowOrchestrator.controlNode(nodeRunId, action);
