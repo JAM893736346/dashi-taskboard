@@ -126,8 +126,8 @@ export function CodexHistorySyncDialog({
     >
       <header className="codex-history-header">
         <div>
-          <strong id="codex-history-title">同步 Codex 历史</strong>
-          <span>活动任务</span>
+          <strong id="codex-history-title">将 Codex Chat 导入议题</strong>
+          <span>手动转换</span>
         </div>
         <button
           type="button"
@@ -155,7 +155,7 @@ export function CodexHistorySyncDialog({
             <ul className="codex-history-failures">
               {result.failures.map((failure, index) => (
                 <li key={`${failure.threadId ?? "unknown"}-${index}`}>
-                  <span>{failure.threadId ?? "未知任务"}</span>
+                  <span>{failure.threadId ?? "未知 Chat"}</span>
                   <strong>{failure.message}</strong>
                 </li>
               ))}
@@ -179,7 +179,7 @@ export function CodexHistorySyncDialog({
             ) : error ? (
               <div className="codex-history-state is-error">{error}</div>
             ) : items.length === 0 ? (
-              <div className="codex-history-state">没有可显示的活动任务</div>
+              <div className="codex-history-state">没有可导入的 Codex Chat</div>
             ) : (
               <ul className="codex-history-list">
                 {items.map((item) => {
@@ -234,7 +234,7 @@ export function CodexHistorySyncDialog({
             disabled={loading || importing || available === 0}
             onClick={() => void confirmImport()}
           >
-            {importing ? "正在导入…" : `导入 ${available} 个任务`}
+            {importing ? "正在导入…" : `将 ${available} 个 Chat 导入议题`}
           </button>
         )}
       </footer>

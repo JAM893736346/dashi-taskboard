@@ -6,6 +6,7 @@ import type {
   AiChatAttachmentInput,
   AiChatRun,
   AiChatSandbox,
+  AiChatSyncResult,
   AiChatThread,
   AiChatThreadSnapshot,
   Attachment,
@@ -18,6 +19,9 @@ import type {
   DevelopmentScan,
   IssueRelationType,
   Project,
+  ProjectDeviceLink,
+  ProjectWorkspaceCreateResult,
+  ProjectWorkspacePreview,
   Task,
   TaskboardMetadata,
   TaskDraft,
@@ -260,6 +264,74 @@ export async function listDeviceWorkspaces(signal?: AbortSignal): Promise<Record
     if (error instanceof ApiError && error.code === "LOCAL_COMPANION_REQUIRED") return {};
     throw error;
   }
+}
+
+export async function pickProjectParent(): Promise<string | null> {
+  const data = await request<{ parentPath: string | null }>(
+    "/api/local/project-parent-picker",
+    { method: "POST" },
+  );
+  return data.parentPath;
+}
+
+export async function previewProjectWorkspace(
+  name: string,
+  parentPath: string,
+  signal?: AbortSignal,
+): Promise<ProjectWorkspacePreview> {
+  return request<ProjectWorkspacePreview>("/api/local/project-workspaces/preview", {
+    method: "POST",
+    body: JSON.stringify({ name, parentPath }),
+    signal,
+  });
+}
+
+export async function createProjectWorkspace(
+  name: string,
+  parentPath: string,
+): Promise<ProjectWorkspaceCreateResult> {
+  return request<ProjectWorkspaceCreateResult>("/api/local/project-workspaces", {
+    method: "POST",
+    body: JSON.stringify({ name, parentPath }),
+  });
+}
+
+export async function listProjectDeviceLinks(
+  signal?: AbortSignal,
+): Promise<ProjectDeviceLink[]> {
+  const data = await request<{ links: ProjectDeviceLink[] }>(
+    "/api/local/project-links",
+    { signal },
+  );
+  return data.links;
+}
+
+export async function saveProjectDeviceLink(
+  projectId: string,
+  input: { workspacePath: string; codexProjectId: string | null },
+): Promise<ProjectDeviceLink> {
+  const data = await request<{ link: ProjectDeviceLink }>(
+    `/api/local/project-links/${encodeURIComponent(projectId)}`,
+    { method: "PUT", body: JSON.stringify(input) },
+  );
+  return data.link;
+}
+
+export async function reconcileProjectDeviceLink(
+  projectId: string,
+  workspacePath: string,
+): Promise<ProjectDeviceLink> {
+  const data = await request<{ link: ProjectDeviceLink }>(
+    `/api/local/project-links/${encodeURIComponent(projectId)}/reconcile`,
+    { method: "POST", body: JSON.stringify({ workspacePath }) },
+  );
+  return data.link;
+}
+
+export async function syncAiChats(): Promise<AiChatSyncResult> {
+  return request<AiChatSyncResult>("/api/local/ai/sync-codex-history", {
+    method: "POST",
+  });
 }
 
 export async function getAutomaticProcessingSettings(

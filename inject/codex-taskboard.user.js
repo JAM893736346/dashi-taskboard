@@ -603,6 +603,39 @@
     } catch (_) {}
   }
 
+  async function registerProjectWorkspace(payload) {
+    const taskboardProjectId = typeof payload?.taskboardProjectId === "string"
+      ? payload.taskboardProjectId.trim()
+      : "";
+    const workspacePath = typeof payload?.workspacePath === "string"
+      ? payload.workspacePath.trim()
+      : "";
+    if (!taskboardProjectId || !workspacePath) return;
+    try {
+      const bridge = window.electronBridge;
+      if (!bridge || typeof bridge.sendMessageFromView !== "function") {
+        throw new Error("当前 Codex 版本没有提供项目注册能力");
+      }
+      await bridge.sendMessageFromView({
+        type: "electron-set-active-workspace-root",
+        root: workspacePath,
+      });
+      postHostContext();
+      postToFrame({
+        type: "taskboard:workspace-registered",
+        payload: { taskboardProjectId, workspacePath },
+      });
+    } catch (error) {
+      postToFrame({
+        type: "taskboard:workspace-registration-failed",
+        payload: {
+          taskboardProjectId,
+          message: error instanceof Error ? error.message : "项目注册失败",
+        },
+      });
+    }
+  }
+
   function projectRowById(projectId) {
     if (typeof projectId !== "string" || !projectId.trim()) return null;
     return Array.from(document.querySelectorAll("[data-app-action-sidebar-project-row]"))
@@ -814,6 +847,10 @@
     }
     if (message.type === "taskboard:automation-request") {
       void handleAutomationRequest(message.payload);
+      return;
+    }
+    if (message.type === "taskboard:register-workspace") {
+      void registerProjectWorkspace(message.payload);
       return;
     }
     if (message.type === "taskboard:create-thread") void createThreadForTask(message.payload);

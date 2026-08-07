@@ -37,6 +37,7 @@ import {
   normalizeChatSelection,
   parseAiChatComposerFragment,
   patchAiChatSnapshot,
+  promptChatTitle,
   reasoningEffortForModel,
 } from "../aiChatState";
 import type {
@@ -56,6 +57,7 @@ interface AiChatProps {
   available: boolean;
   projectId: string | null;
   issueId: string | null;
+  syncRevision: number;
 }
 
 type MenuName = "model" | "model-list" | "effort-list" | "sandbox" | null;
@@ -943,7 +945,7 @@ function OptionMenu({
   );
 }
 
-export function AiChat({ available, projectId, issueId }: AiChatProps) {
+export function AiChat({ available, projectId, issueId, syncRevision }: AiChatProps) {
   const [panelOpen, setPanelOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [menu, setMenu] = useState<MenuName>(null);
@@ -1195,7 +1197,7 @@ export function AiChat({ available, projectId, issueId }: AiChatProps) {
       return;
     }
     void loadThreads();
-  }, [available, loadThreads]);
+  }, [available, loadThreads, syncRevision]);
 
   useEffect(() => {
     setSnapshot(null);
@@ -1464,7 +1466,7 @@ export function AiChat({ available, projectId, issueId }: AiChatProps) {
     setError(null);
   }
 
-  async function createThreadForDraftOrigin(): Promise<AiChatThread | null> {
+  async function createThreadForDraftOrigin(title?: string): Promise<AiChatThread | null> {
     const origin = draftOrigin ?? (
       projectId ? { projectId, issueId } : null
     );
@@ -1501,6 +1503,7 @@ export function AiChat({ available, projectId, issueId }: AiChatProps) {
       const thread = await createAiChatThread({
         ...input,
         ...settings,
+        ...(title ? { title } : {}),
       });
       replaceThread(thread);
       selectThread(thread.id);
@@ -1764,7 +1767,7 @@ export function AiChat({ available, projectId, issueId }: AiChatProps) {
       return;
     }
     if (creatingThread && clearSubmittedDraft) resetComposer();
-    if (!thread) thread = await createThreadForDraftOrigin();
+    if (!thread) thread = await createThreadForDraftOrigin(promptChatTitle(trimmed));
     if (!thread) return;
     const messageSkillIds = (
       boundSkillIds !== undefined || catalogLoadedProjectId === thread.origin.projectId

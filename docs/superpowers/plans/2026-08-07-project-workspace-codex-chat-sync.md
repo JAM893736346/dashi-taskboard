@@ -34,7 +34,7 @@ Project instructions explicitly replace test-first development for this feature.
 - Create: `server/project-workspace.mjs`
 - Modify: `server/cloud-config.mjs`
 
-- [ ] **Step 1: Implement generated workspace names and canonical matching**
+- [x] **Step 1: Implement generated workspace names and canonical matching**
 
 Export these concrete helpers from `server/project-workspace.mjs`:
 
@@ -67,7 +67,7 @@ export async function matchCodexProjectByWorkspace(workspaces, workspacePath) {
 
 Define `ProjectWorkspaceError` with `status`, `code`, and `message` so `server/app.mjs` can translate failures without string matching.
 
-- [ ] **Step 2: Implement the macOS parent picker and preview**
+- [x] **Step 2: Implement the macOS parent picker and preview**
 
 Use `/usr/bin/osascript` only on Darwin and make cancel return `null`:
 
@@ -98,7 +98,7 @@ export async function previewProjectWorkspace({ name, parentPath }) {
 }
 ```
 
-- [ ] **Step 3: Implement the single-directory transaction**
+- [x] **Step 3: Implement the single-directory transaction**
 
 Add a callback-based operation that owns only the child directory it creates:
 
@@ -129,7 +129,7 @@ export async function createProjectWorkspace({ name, parentPath, createBusinessP
 
 Do not use recursive removal; rollback succeeds only while the request-created directory remains empty. `saveDeviceLink` must be part of the same successful local operation and return the normalized `ProjectDeviceLink` rather than the entire config object.
 
-- [ ] **Step 4: Extend local companion configuration without replacing existing workspace consumers**
+- [x] **Step 4: Extend local companion configuration without replacing existing workspace consumers**
 
 Keep `projectMappings` as the canonical Taskboard-to-workspace map and add `codexProjectMappings`:
 
@@ -202,7 +202,7 @@ Retain `setProjectWorkspace()` as an atomic update of only `projectMappings[proj
 **Files:**
 - Modify: `server/app.mjs`
 
-- [ ] **Step 1: Wire the workspace service into server construction**
+- [x] **Step 1: Wire the workspace service into server construction**
 
 Import the Task 1 helpers, add `projectParentPicker` and `projectWorkspaceCreator` injectable options, and keep the real operation as the defaults:
 
@@ -234,7 +234,7 @@ async function remoteBusiness(pathname, { method = "GET", body } = {}) {
 }
 ```
 
-- [ ] **Step 2: Create business projects through the active local/cloud path**
+- [x] **Step 2: Create business projects through the active local/cloud path**
 
 Inside `createTaskboardServer()`, define:
 
@@ -257,7 +257,7 @@ async function createBusinessProject(input) {
 
 Cloud forwarding strips `workspacePath` before the business write and stores it in local config through the existing proxy localization path. Local mode stores it in SQLite.
 
-- [ ] **Step 3: Add loopback-only picker, preview, create, list, save, and reconcile routes**
+- [x] **Step 3: Add loopback-only picker, preview, create, list, save, and reconcile routes**
 
 Add these routes before the generic cloud forwarding block; `/api/local/*` already requires loopback:
 
@@ -283,7 +283,7 @@ return sendJson(response, 201, result);
 
 The reconcile route calls `readCodexProjectWorkspaces()`, matches by canonical workspace path, saves the opaque native ID when found, and returns a `pending` link otherwise. It must never derive the native ID from the Taskboard ID.
 
-- [ ] **Step 4: Keep all new routes local in cloud mode**
+- [x] **Step 4: Keep all new routes local in cloud mode**
 
 Confirm `isLocalCompanionRoute()` continues to match the new `/api/local/*` routes. Do not add filesystem paths or `codexProjectId` to `cloud/src/index.mjs`, D1 migrations, or remote business records.
 
@@ -295,7 +295,7 @@ Confirm `isLocalCompanionRoute()` continues to match the new `/api/local/*` rout
 - Create: `web/src/components/ProjectCreateDialog.tsx`
 - Modify: `web/src/styles.css`
 
-- [ ] **Step 1: Define one typed device-link contract**
+- [x] **Step 1: Define one typed device-link contract**
 
 Add:
 
@@ -324,11 +324,11 @@ export interface AiChatSyncResult {
 }
 ```
 
-- [ ] **Step 2: Add exact local HTTP functions**
+- [x] **Step 2: Add exact local HTTP functions**
 
 Add `pickProjectParent()`, `previewProjectWorkspace(name, parentPath)`, `createProjectWorkspace(name, parentPath)`, `listProjectDeviceLinks()`, `saveProjectDeviceLink(projectId, input)`, `reconcileProjectDeviceLink(projectId, workspacePath)`, and `syncAiChats()` to `web/src/api.ts`. Return `null` when the picker responds with `{ parentPath: null }`; let ordinary `ApiError` handling surface all other failures.
 
-- [ ] **Step 3: Build the focused dialog**
+- [x] **Step 3: Build the focused dialog**
 
 `ProjectCreateDialog` receives:
 
@@ -342,7 +342,7 @@ interface ProjectCreateDialogProps {
 
 Use a native `<dialog>` with a required name input, a folder icon button for `pickProjectParent()`, a read-only path preview returned by `previewProjectWorkspace()`, and one primary `创建项目` button. Picker cancellation must leave prior form state unchanged; submitting calls `createProjectWorkspace()` exactly once and reports the server message inline.
 
-- [ ] **Step 4: Style only the dialog and sync label**
+- [x] **Step 4: Style only the dialog and sync label**
 
 Add compact `.project-create-dialog`, `.project-create-directory`, `.project-sync-status.is-pending`, and `.project-sync-status.is-synced` rules. Reuse existing colors, dialog shadow, button classes, 8px-or-smaller radii, and responsive breakpoints; do not add cards inside the dialog.
 
@@ -351,15 +351,15 @@ Add compact `.project-create-dialog`, `.project-create-directory`, `.project-syn
 **Files:**
 - Modify: `web/src/App.tsx`
 
-- [ ] **Step 1: Load business projects, native workspaces, and links together**
+- [x] **Step 1: Load business projects, native workspaces, and links together**
 
 Replace browser-local `deviceWorkspacePaths` as the authoritative source with `ProjectDeviceLink[]` loaded by `listProjectDeviceLinks()`. Build maps by Taskboard ID and native Codex ID; migrate an existing typed path only by calling `saveProjectDeviceLink()` when the server has no link, then read the server result back.
 
-- [ ] **Step 2: Merge host projects by native ID and expose sync state**
+- [x] **Step 2: Merge host projects by native ID and expose sync state**
 
 For each `hostContext.projects` item, resolve `linkByCodexProjectId.get(project.id)?.taskboardProjectId` before checking `persistedById`. For each persisted project, set `inCodex` from its link's native ID or direct native ID match. `ProjectChoice.id` remains the stable Taskboard ID and gains `codexProjectId`, `workspacePath`, and `syncStatus` fields.
 
-- [ ] **Step 3: Create and open the project from the home action**
+- [x] **Step 3: Create and open the project from the home action**
 
 Add a folder-plus `创建项目` button beside the manual history action and mount `ProjectCreateDialog` once near the other top-level dialogs. On `onCreated`:
 
@@ -372,7 +372,7 @@ if (embedded) registerWorkspace(result.link);
 
 Update the empty state copy so project creation is available directly from Taskboard.
 
-- [ ] **Step 4: Register and reconcile a pending workspace**
+- [x] **Step 4: Register and reconcile a pending workspace**
 
 In embedded mode, post:
 
@@ -388,7 +388,7 @@ window.parent.postMessage({
 
 Handle `taskboard:workspace-registered` by calling `reconcileProjectDeviceLink()`, upserting the returned link, refreshing the project list, and announcing `已同步到 Codex` only when the returned status is `synced`. Retry any pending selected-project link after `taskboard:opened` or host context refresh.
 
-- [ ] **Step 5: Resolve every native operation through the device link**
+- [x] **Step 5: Resolve every native operation through the device link**
 
 Replace the current `selectedProject.id` fallback in `openTaskInThread()` and development-context calls with:
 
@@ -405,7 +405,7 @@ Pass the real `codexProjectId` only when available. Do not assume equal IDs for 
 **Files:**
 - Modify: `inject/codex-taskboard.user.js`
 
-- [ ] **Step 1: Implement the narrow bridge operation**
+- [x] **Step 1: Implement the narrow bridge operation**
 
 Add:
 
@@ -431,7 +431,7 @@ async function registerProjectWorkspace(payload) {
 }
 ```
 
-- [ ] **Step 2: Add exactly one message branch**
+- [x] **Step 2: Add exactly one message branch**
 
 Handle only `taskboard:register-workspace` in the existing frame-message listener and call `registerProjectWorkspace(message.payload)`. Do not expose arbitrary Electron messages or filesystem operations to the iframe.
 
@@ -441,7 +441,7 @@ Handle only `taskboard:register-workspace` in the existing frame-message listene
 - Modify: `web/src/aiChatState.ts`
 - Modify: `web/src/components/AiChat.tsx`
 
-- [ ] **Step 1: Add the 32-character display title helper**
+- [x] **Step 1: Add the 32-character display title helper**
 
 ```ts
 export function promptChatTitle(message: string): string | undefined {
@@ -451,7 +451,7 @@ export function promptChatTitle(message: string): string | undefined {
 }
 ```
 
-- [ ] **Step 2: Freeze that title when the first Prompt creates the Chat**
+- [x] **Step 2: Freeze that title when the first Prompt creates the Chat**
 
 Change `createThreadForDraftOrigin()` to accept `title?: string`, pass it to `createAiChatThread()`, and call it from `startMessage()` as:
 
@@ -473,7 +473,7 @@ Opening `新建对话` remains side-effect free; only the first submitted Prompt
 - Modify: `web/src/components/AiChat.tsx`
 - Modify: `web/src/App.tsx`
 
-- [ ] **Step 1: Normalize visible Codex thread history**
+- [x] **Step 1: Normalize visible Codex thread history**
 
 Add `generatedTitle: typeof value.name === "string" && value.name.trim() ? value.name.trim() : null` to `historyThread()`, while keeping its existing `title` fallback for the manual issue-import UI. Add `readCodexChatThreads({ codexExecutable, cwd, threadIds })` using the existing `withCodexAppServer()` and `thread/read` with `{ threadId, includeTurns: true }`. Flatten turn items in order and emit only visible messages:
 
@@ -500,7 +500,7 @@ function codexChatEvent(item, threadId, index) {
 
 The observed Codex app-server schema uses `userMessage.content[]` text blocks and `agentMessage.text`; ignore reasoning, file change, command, tool, and other activity records in this change.
 
-- [ ] **Step 2: Add idempotent native-thread upsert storage**
+- [x] **Step 2: Add idempotent native-thread upsert storage**
 
 Add `getAiChatThreadByCodexThreadId(codexThreadId)` and `upsertCodexAiChatThread(input)` to `TaskboardDatabase`. The transaction must:
 
@@ -514,11 +514,11 @@ commit and return the one local Chat thread
 
 Preserve locally produced run events and active thread status. Repeated scans update the same row and never create a second Chat for the same native thread ID.
 
-- [ ] **Step 3: Make AI workspace resolution device-link aware**
+- [x] **Step 3: Make AI workspace resolution device-link aware**
 
 Allow `resolveAiWorkspace()` and `discoverAiCatalog()` to receive an optional project/device resolver. When present, resolve the stable Taskboard project metadata, workspace path, and native Codex ID from the device link; still return `addDirectories` from all available device workspaces. This lets local Chat execution work when `taskboardProjectId !== codexProjectId` and in local-companion cloud mode.
 
-- [ ] **Step 4: Add Chat reconciliation to `AiChatService`**
+- [x] **Step 4: Add Chat reconciliation to `AiChatService`**
 
 Inject `listCodexHistory`, `readCodexChatThreads`, and a `listProjectsWithDeviceLinks` callback. Implement `syncCodexHistory()` as:
 
@@ -533,7 +533,7 @@ return { created, updated, skipped }
 
 For Taskboard-originated Chats, match by `codexThreadId` and replace the prompt title only when Codex supplies a non-empty generated `name`; retain the prompt excerpt when history has only `preview`.
 
-- [ ] **Step 5: Expose one silent Chat synchronization route**
+- [x] **Step 5: Expose one silent Chat synchronization route**
 
 Add loopback-only:
 
@@ -543,11 +543,11 @@ POST /api/local/ai/sync-codex-history
 
 It accepts an empty body, calls `aiChat.syncCodexHistory()`, and returns the counts. It never calls `/api/codex-import`, `database.importCodexTask()`, or emits `task.created`.
 
-- [ ] **Step 6: Refresh the Chat list after synchronization**
+- [x] **Step 6: Refresh the Chat list after synchronization**
 
 Add an optional numeric `syncRevision` prop to `AiChat`. Include it in the effect that calls `loadThreads()`, preserving the selected local thread when it still exists.
 
-- [ ] **Step 7: Replace the current automatic issue import**
+- [x] **Step 7: Replace the current automatic issue import**
 
 In the existing `codexHistorySyncRequest` effect in `App.tsx`, replace `listCodexHistory() + listImportedCodexThreadIds() + importCodexHistory()` with one silent `syncAiChats()` call. Increment `aiChatSyncRevision` when `created > 0 || updated > 0`; do not refresh project issue counts and do not show the manual history dialog.
 
@@ -559,7 +559,7 @@ Keep `CodexHistorySyncDialog` and `/api/codex-import` unchanged as the explicit 
 - Verify: all files listed above
 - Do not stage: `scripts/codex-injector-runtime.mjs`, `scripts/codex-injector.mjs`, `test/injector.test.mjs`, `.superpowers/`, `test/injector-startup.test.mjs`
 
-- [ ] **Step 1: Run static and production checks**
+- [x] **Step 1: Run static and production checks**
 
 Run:
 
@@ -576,7 +576,7 @@ git diff --check
 
 Expected: every command exits 0. `npm run build` may report the existing bundle-size warning and may refresh an already open embedded frame.
 
-- [ ] **Step 2: Verify standalone project creation**
+- [x] **Step 2: Verify standalone project creation**
 
 Run `npm run dev`, open the reported localhost URL, choose a disposable parent directory, create a named project, and record:
 
@@ -589,7 +589,7 @@ Taskboard opens the stable Taskboard project ID
 project card shows 等待 Codex 同步
 ```
 
-- [ ] **Step 3: Verify embedded native registration and double-ID merging**
+- [x] **Step 3: Verify embedded native registration and double-ID merging**
 
 Run `npm run codex:reload`, open Taskboard in the CDP-enabled Codex window, and confirm the child root is activated through `electron-set-active-workspace-root`. Read `GET /api/local/project-links` and confirm one link contains the stable Taskboard ID, opaque Codex ID, and canonical workspace path; the project home shows one merged project with `已同步到 Codex`.
 
@@ -597,11 +597,13 @@ Run `npm run codex:reload`, open Taskboard in the CDP-enabled Codex window, and 
 
 Inside the new project, click `新建对话` and confirm no Chat is created yet. Submit a multi-line Prompt and confirm the first non-empty line is immediately shown, capped at 32 display characters, execution starts in the linked workspace, and the saved `codexThreadId` appears under the same native Codex project. Reopen Taskboard after Codex names the thread and confirm the title reconciles without changing the issue count.
 
+Verified the side-effect-free composer, prompt title, immediate execution, saved native thread ID, Taskboard reconciliation, and unchanged issue count. Codex persists Taskboard-created runs with `source: "exec"`; its default desktop history filter only lists `cli`/`vscode`, so native project-list visibility remains a host-surface limitation.
+
 - [ ] **Step 5: Verify Codex-originated Chat import and resume**
 
 Create a Chat directly inside the native Codex project, reopen Taskboard, and confirm it appears exactly once with visible user/assistant history. Continue it from Taskboard and confirm the run resumes the same native thread ID. Compare project issue count before and after; it must remain unchanged. Open the manual `同步 Codex 历史` dialog and confirm explicit issue import remains available.
 
-- [ ] **Step 6: Inspect and commit only this implementation**
+- [x] **Step 6: Inspect and commit only this implementation**
 
 Review `git diff --stat`, `git diff --check`, and the complete staged diff. Stage only the implementation files from Tasks 1-7 and create one focused commit:
 

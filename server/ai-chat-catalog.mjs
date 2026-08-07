@@ -51,13 +51,22 @@ export async function loadDeviceWorkspaces(codexStatePath, database) {
   return workspaces;
 }
 
-export async function resolveAiWorkspace(projectId, codexStatePath, database) {
-  const project = await database.getProject(projectId);
+export async function resolveAiWorkspace(
+  projectId,
+  codexStatePath,
+  database,
+  resolveProjectDevice,
+) {
+  const deviceProject = resolveProjectDevice ? await resolveProjectDevice(projectId) : null;
+  const project = deviceProject?.project ?? await database.getProject(projectId);
   if (!project) {
     throw new ApiError(404, "PROJECT_NOT_FOUND", `Project '${projectId}' does not exist`);
   }
   const workspaces = await loadDeviceWorkspaces(codexStatePath, database);
-  const workspacePath = workspaces.get(projectId);
+  const linkedWorkspacePath = await existingDirectory(deviceProject?.workspacePath);
+  const workspacePath = linkedWorkspacePath
+    ?? workspaces.get(deviceProject?.codexProjectId)
+    ?? workspaces.get(projectId);
   if (!workspacePath) {
     throw new ApiError(
       409,
@@ -67,7 +76,8 @@ export async function resolveAiWorkspace(projectId, codexStatePath, database) {
   }
   return {
     workspacePath,
-    addDirectories: [...new Set(workspaces.values())].filter((candidate) => candidate !== workspacePath),
+    addDirectories: [...new Set([...workspaces.values(), linkedWorkspacePath].filter(Boolean))]
+      .filter((candidate) => candidate !== workspacePath),
     project,
   };
 }
@@ -235,8 +245,14 @@ export async function discoverAiCatalog({
   database,
   projectId,
   processEnv,
+  resolveProjectDevice,
 }) {
-  const { workspacePath } = await resolveAiWorkspace(projectId, codexStatePath, database);
+  const { workspacePath } = await resolveAiWorkspace(
+    projectId,
+    codexStatePath,
+    database,
+    resolveProjectDevice,
+  );
   const [modelResult, skillEntries] = await Promise.all([
     execFileAsync(codexExecutable, ["debug", "models"], {
       cwd: workspacePath,

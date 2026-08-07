@@ -755,6 +755,17 @@ export class TaskboardDatabase {
     return row ? this.#aiChatThreadWithCurrentRun(row) : null;
   }
 
+  getAiChatThreadByCodexThreadId(codexThreadId) {
+    if (typeof codexThreadId !== "string" || !codexThreadId) return null;
+    const row = this.database.prepare(`
+      SELECT * FROM ai_chat_threads
+      WHERE codex_thread_id = ?
+      ORDER BY created_at, id
+      LIMIT 1
+    `).get(codexThreadId);
+    return row ? this.#aiChatThreadWithCurrentRun(row) : null;
+  }
+
   createAiChatThread(input) {
     const id = input.id ?? randomUUID();
     const timestamp = input.createdAt ?? now();
@@ -783,6 +794,93 @@ export class TaskboardDatabase {
       input.updatedAt ?? timestamp,
     );
     return this.getAiChatThread(id);
+  }
+
+  upsertCodexAiChatThread(input) {
+    const current = this.getAiChatThreadByCodexThreadId(input.codexThreadId);
+    const id = current?.id ?? input.id ?? randomUUID();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (current) {
+        this.database.prepare(`
+          UPDATE ai_chat_threads
+          SET
+            title = ?,
+            origin_project_id = ?,
+            origin_project_name = ?,
+            origin_workspace_path = ?,
+            origin_issue_id = ?,
+            origin_issue_identifier = ?,
+            updated_at = CASE WHEN updated_at > ? THEN updated_at ELSE ? END
+          WHERE id = ?
+        `).run(
+          input.title,
+          input.origin.projectId,
+          input.origin.projectName,
+          input.origin.workspacePath,
+          input.origin.issueId ?? null,
+          input.origin.issueIdentifier ?? null,
+          input.updatedAt,
+          input.updatedAt,
+          id,
+        );
+      } else {
+        this.database.prepare(`
+          INSERT INTO ai_chat_threads (
+            id, title, status,
+            origin_project_id, origin_project_name, origin_workspace_path,
+            origin_issue_id, origin_issue_identifier,
+            codex_thread_id, model, reasoning_effort, sandbox,
+            created_at, updated_at
+          ) VALUES (?, ?, 'idle', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          id,
+          input.title,
+          input.origin.projectId,
+          input.origin.projectName,
+          input.origin.workspacePath,
+          input.origin.issueId ?? null,
+          input.origin.issueIdentifier ?? null,
+          input.codexThreadId,
+          input.model,
+          input.reasoningEffort,
+          input.sandbox,
+          input.createdAt,
+          input.updatedAt,
+        );
+      }
+
+      this.database.prepare(`
+        DELETE FROM ai_chat_events
+        WHERE thread_id = ?
+          AND run_id IS NULL
+          AND json_extract(data, '$.source') = 'codex-history'
+      `).run(id);
+      const insertEvent = this.database.prepare(`
+        INSERT INTO ai_chat_events (
+          id, thread_id, run_id, type, role, content, data, created_at
+        ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?)
+      `);
+      for (const event of input.events) {
+        insertEvent.run(
+          event.id,
+          id,
+          event.type,
+          event.role,
+          event.content,
+          JSON.stringify({ ...(event.data ?? {}), source: "codex-history" }),
+          event.createdAt,
+        );
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+    return {
+      status: current ? "updated" : "created",
+      thread: this.getAiChatThread(id),
+    };
   }
 
   updateAiChatThread(id, changes) {

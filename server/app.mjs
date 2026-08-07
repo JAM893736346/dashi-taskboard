@@ -24,13 +24,25 @@ import { createAutomaticProcessingBusinessStore } from "./automatic-processing-b
 import { createAutomaticProcessingConfigStore } from "./automatic-processing-config.mjs";
 import { runAutomaticProcessingIssue } from "./automatic-processing-runner.mjs";
 import { createCloudConfigStore } from "./cloud-config.mjs";
-import { listCodexActivity, listCodexHistory } from "./codex-history.mjs";
+import {
+  listCodexActivity,
+  listCodexChatMetadata,
+  listCodexHistory,
+  readCodexChatThreads,
+} from "./codex-history.mjs";
 import {
   CloudProxyError,
   createCloudProxy,
   isLocalCompanionRoute,
 } from "./cloud-proxy.mjs";
 import { ApiError, TaskboardDatabase } from "./database.mjs";
+import {
+  ProjectWorkspaceError,
+  chooseProjectParent,
+  createProjectWorkspace,
+  matchCodexProjectByWorkspace,
+  previewProjectWorkspace,
+} from "./project-workspace.mjs";
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const execFileAsync = promisify(execFile);
@@ -537,6 +549,31 @@ function parseProjectCreate(body) {
     throw new ApiError(400, "INVALID_FIELD", "'workspacePath' cannot contain null bytes");
   }
   return { id, name, workspacePath };
+}
+
+function parseProjectWorkspaceInput(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["name", "parentPath"]));
+  const name = stringField(body.name, "name", { maxLength: 200 });
+  const parentPath = stringField(body.parentPath, "parentPath", { maxLength: 4096 });
+  if (parentPath.includes("\0") || !path.isAbsolute(parentPath)) {
+    throw new ApiError(400, "INVALID_FIELD", "'parentPath' must be an absolute path");
+  }
+  return { name, parentPath };
+}
+
+function parseProjectLinkInput(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["workspacePath", "codexProjectId"]));
+  const workspacePath = stringField(body.workspacePath, "workspacePath", { maxLength: 4096 });
+  if (workspacePath.includes("\0") || !path.isAbsolute(workspacePath)) {
+    throw new ApiError(400, "INVALID_FIELD", "'workspacePath' must be an absolute path");
+  }
+  const codexProjectId = stringField(body.codexProjectId ?? null, "codexProjectId", {
+    nullable: true,
+    maxLength: 256,
+  });
+  return { workspacePath, codexProjectId };
 }
 
 function parseThreadId(value) {
@@ -1427,6 +1464,75 @@ export function createTaskboardServer(options = {}) {
       )) ?? null;
     },
   });
+  const projectParentPicker = options.projectParentPicker ?? chooseProjectParent;
+  const projectWorkspaceCreator = options.projectWorkspaceCreator ?? createProjectWorkspace;
+
+  async function remoteBusiness(pathname, { method = "GET", body } = {}) {
+    const headers = new Headers();
+    if (body !== undefined) headers.set("content-type", "application/json");
+    const upstream = await cloudProxy.forward(new Request(`http://127.0.0.1${pathname}`, {
+      method,
+      headers,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }));
+    const payload = await upstream.json().catch(() => ({}));
+    if (!upstream.ok) {
+      throw new ApiError(
+        upstream.status,
+        payload.error?.code ?? "BUSINESS_REQUEST_FAILED",
+        payload.error?.message ?? `Business request failed (${upstream.status})`,
+      );
+    }
+    return payload;
+  }
+
+  async function createBusinessProject(input) {
+    const config = await cloudConfig.read();
+    if (config.remoteUrl) {
+      const payload = await remoteBusiness("/api/projects", {
+        method: "POST",
+        body: input,
+      });
+      return payload.project;
+    }
+    const project = database.createProject(input);
+    events.emit("project.created", { project });
+    return project;
+  }
+
+  async function listBusinessProjectsWithDeviceLinks() {
+    const config = await cloudConfig.read();
+    const projects = config.remoteUrl
+      ? (await remoteBusiness("/api/projects")).projects
+      : database.listProjects();
+    return projects.map((project) => ({
+      ...project,
+      workspacePath: config.projectMappings[project.id] ?? project.workspacePath,
+      codexProjectId: config.codexProjectMappings?.[project.id] ?? null,
+    }));
+  }
+
+  async function resolveProjectDevice(projectId) {
+    const project = (await listBusinessProjectsWithDeviceLinks())
+      .find((candidate) => candidate.id === projectId);
+    if (!project) return null;
+    return {
+      project,
+      workspacePath: project.workspacePath,
+      codexProjectId: project.codexProjectId,
+    };
+  }
+
+  async function projectWorkspaceOperation(operation) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof ProjectWorkspaceError) {
+        throw new ApiError(error.status, error.code, error.message);
+      }
+      throw error;
+    }
+  }
   const automaticProcessingConfig = options.automaticProcessingConfigStore
     ?? createAutomaticProcessingConfigStore({
       configPath: resolved.automaticProcessingConfigPath,
@@ -1458,14 +1564,27 @@ export function createTaskboardServer(options = {}) {
       dispatcher.wake(event.type);
     }
   });
+  const codexHistoryList = options.codexHistoryList ?? listCodexHistory;
+  const codexChatMetadataList = options.codexChatMetadataList ?? listCodexChatMetadata;
+  const codexChatHistoryRead = options.codexChatHistoryRead ?? readCodexChatThreads;
+  const codexActivityList = options.codexActivityList ?? listCodexActivity;
   const aiChat = new AiChatService({
     database,
     codexExecutable: resolved.codexExecutable,
     codexStatePath: resolved.codexStatePath,
     manageTaskboardSkillPath: resolved.skillPath,
+    resolveProjectDevice,
+    listProjectsWithDeviceLinks: listBusinessProjectsWithDeviceLinks,
+    listCodexChatMetadata: () => codexChatMetadataList({
+      codexExecutable: resolved.codexExecutable,
+      cwd: PROJECT_ROOT,
+    }),
+    readCodexChatThreads: (threadIds) => codexChatHistoryRead({
+      codexExecutable: resolved.codexExecutable,
+      cwd: PROJECT_ROOT,
+      threadIds,
+    }),
   });
-  const codexHistoryList = options.codexHistoryList ?? listCodexHistory;
-  const codexActivityList = options.codexActivityList ?? listCodexActivity;
   const aiEventResponses = new Set();
 
   const server = createServer(async (request, response) => {
@@ -1605,6 +1724,87 @@ export function createTaskboardServer(options = {}) {
         return sendJson(response, 200, { status: await dispatcher.getStatus() });
       }
 
+      if (pathname === "/api/local/project-parent-picker") {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        assertNoQuery(url.searchParams, "POST /api/local/project-parent-picker");
+        await assertEmptyRequestBody(request, "POST /api/local/project-parent-picker");
+        return sendJson(response, 200, {
+          parentPath: await projectWorkspaceOperation(() => projectParentPicker()),
+        });
+      }
+
+      if (pathname === "/api/local/project-workspaces/preview") {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        assertNoQuery(url.searchParams, "POST /api/local/project-workspaces/preview");
+        const input = parseProjectWorkspaceInput(await readJson(request));
+        return sendJson(
+          response,
+          200,
+          await projectWorkspaceOperation(() => previewProjectWorkspace(input)),
+        );
+      }
+
+      if (pathname === "/api/local/project-workspaces") {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        assertNoQuery(url.searchParams, "POST /api/local/project-workspaces");
+        const input = parseProjectWorkspaceInput(await readJson(request));
+        const result = await projectWorkspaceOperation(() => projectWorkspaceCreator({
+          ...input,
+          createBusinessProject,
+          saveDeviceLink: (projectId, link) => cloudConfig.setProjectLink(projectId, link),
+        }));
+        return sendJson(response, 201, result);
+      }
+
+      if (pathname === "/api/local/project-links") {
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        assertNoQuery(url.searchParams, "GET /api/local/project-links");
+        return sendJson(response, 200, { links: await cloudConfig.listProjectLinks() });
+      }
+
+      const projectLinkReconcileRoute = pathname.match(
+        /^\/api\/local\/project-links\/([^/]+)\/reconcile$/,
+      );
+      if (projectLinkReconcileRoute) {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        assertNoQuery(url.searchParams, "POST /api/local/project-links/:id/reconcile");
+        let projectId;
+        try {
+          projectId = decodeURIComponent(projectLinkReconcileRoute[1]);
+        } catch {
+          throw new ApiError(400, "INVALID_PATH", "Project id contains invalid encoding");
+        }
+        validateProjectId(projectId);
+        const { workspacePath } = parseProjectLinkInput(await readJson(request));
+        const codexProjectId = await matchCodexProjectByWorkspace(
+          await readCodexProjectWorkspaces(resolved.codexStatePath),
+          workspacePath,
+        );
+        const link = await cloudConfig.setProjectLink(projectId, {
+          workspacePath,
+          codexProjectId,
+        });
+        return sendJson(response, 200, { link });
+      }
+
+      const projectLinkRoute = pathname.match(/^\/api\/local\/project-links\/([^/]+)$/);
+      if (projectLinkRoute) {
+        if (request.method !== "PUT") return methodNotAllowed(response, ["PUT"]);
+        assertNoQuery(url.searchParams, "PUT /api/local/project-links/:id");
+        let projectId;
+        try {
+          projectId = decodeURIComponent(projectLinkRoute[1]);
+        } catch {
+          throw new ApiError(400, "INVALID_PATH", "Project id contains invalid encoding");
+        }
+        validateProjectId(projectId);
+        const link = await cloudConfig.setProjectLink(
+          projectId,
+          parseProjectLinkInput(await readJson(request)),
+        );
+        return sendJson(response, 200, { link });
+      }
+
       const projectMappingRoute = pathname.match(/^\/api\/local\/project-mappings\/([^/]+)$/);
       if (projectMappingRoute) {
         if (request.method !== "PUT") return methodNotAllowed(response, ["PUT"]);
@@ -1688,6 +1888,22 @@ export function createTaskboardServer(options = {}) {
             502,
             "CODEX_ACTIVITY_UNAVAILABLE",
             error instanceof Error ? error.message : "Unable to read Codex activity",
+          );
+        }
+      }
+
+      if (pathname === "/api/local/ai/sync-codex-history") {
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        assertNoQuery(url.searchParams, "POST /api/local/ai/sync-codex-history");
+        await assertEmptyRequestBody(request, "POST /api/local/ai/sync-codex-history");
+        try {
+          return sendJson(response, 200, await aiChat.syncCodexHistory());
+        } catch (error) {
+          if (error instanceof ApiError) throw error;
+          throw new ApiError(
+            502,
+            "CODEX_CHAT_SYNC_UNAVAILABLE",
+            error instanceof Error ? error.message : "Unable to synchronize Codex chats",
           );
         }
       }

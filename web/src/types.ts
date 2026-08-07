@@ -227,6 +227,12 @@ export interface AiChatThreadSnapshot {
   runs: AiChatRun[];
 }
 
+export interface AiChatSyncResult {
+  created: number;
+  updated: number;
+  skipped: number;
+}
+
 export interface WorkflowCapabilityOption {
   id: string;
   label: string;
@@ -263,6 +269,23 @@ export interface Project {
   issueCount: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ProjectDeviceLink {
+  taskboardProjectId: string;
+  codexProjectId: string | null;
+  workspacePath: string;
+  status: "pending" | "synced";
+}
+
+export interface ProjectWorkspacePreview {
+  directoryName: string;
+  workspacePath: string;
+}
+
+export interface ProjectWorkspaceCreateResult {
+  project: Project;
+  link: ProjectDeviceLink;
 }
 
 export interface CodexHistoryThread {

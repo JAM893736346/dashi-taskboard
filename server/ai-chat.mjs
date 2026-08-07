@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { matchCodexThreadProject } from "../shared/codex-history-import.mjs";
 import { ApiError } from "./database.mjs";
 import { discoverAiCatalog, resolveAiWorkspace } from "./ai-chat-catalog.mjs";
 import {
@@ -44,6 +45,26 @@ function wait(milliseconds) {
   });
 }
 
+function eventContentKey(event) {
+  return `${event.role}\0${event.content}`;
+}
+
+function historyEventsWithoutLocalDuplicates(historyEvents, localEvents) {
+  const localCounts = new Map();
+  for (const event of localEvents) {
+    if (event.data?.source === "codex-history") continue;
+    const key = eventContentKey(event);
+    localCounts.set(key, (localCounts.get(key) ?? 0) + 1);
+  }
+  return historyEvents.filter((event) => {
+    const key = eventContentKey(event);
+    const count = localCounts.get(key) ?? 0;
+    if (count === 0) return true;
+    localCounts.set(key, count - 1);
+    return false;
+  });
+}
+
 export class AiChatService {
   constructor(options) {
     this.database = options.database;
@@ -52,6 +73,11 @@ export class AiChatService {
     this.manageTaskboardSkillPath = options.manageTaskboardSkillPath;
     this.processEnv = options.processEnv ?? process.env;
     this.killGraceMs = options.killGraceMs ?? 1_000;
+    this.resolveProjectDevice = options.resolveProjectDevice;
+    this.listProjectsWithDeviceLinks = options.listProjectsWithDeviceLinks
+      ?? (async () => this.database.listProjects());
+    this.listCodexChatMetadata = options.listCodexChatMetadata;
+    this.readCodexChatThreads = options.readCodexChatThreads;
     this.active = new Map();
     this.listeners = new Map();
     this.completions = new Map();
@@ -110,13 +136,107 @@ export class AiChatService {
       database: this.database,
       projectId,
       processEnv: this.processEnv,
+      resolveProjectDevice: this.resolveProjectDevice,
     });
+  }
+
+  async syncCodexHistory() {
+    if (!this.listCodexChatMetadata || !this.readCodexChatThreads) {
+      throw new ApiError(
+        503,
+        "CODEX_CHAT_SYNC_UNAVAILABLE",
+        "Codex chat synchronization is unavailable",
+      );
+    }
+    const projects = await this.listProjectsWithDeviceLinks();
+    const projectById = new Map(projects.map((project) => [project.id, project]));
+    const metadata = (await this.listCodexChatMetadata()).flatMap((thread) => {
+      const projectId = matchCodexThreadProject(thread.cwd, projects);
+      return projectId ? [{ ...thread, projectId }] : [];
+    });
+    if (metadata.length === 0) return { created: 0, updated: 0, skipped: 0 };
+
+    const candidates = metadata.filter((thread) => {
+      const existing = this.database.getAiChatThreadByCodexThreadId(thread.threadId);
+      return !existing
+        || thread.updatedAt > existing.updatedAt
+        || Boolean(thread.generatedTitle && thread.generatedTitle !== existing.title);
+    });
+    if (candidates.length === 0) {
+      return { created: 0, updated: 0, skipped: metadata.length };
+    }
+
+    const histories = new Map(
+      (await this.readCodexChatThreads(candidates.map((thread) => thread.threadId)))
+        .map((history) => [history.threadId, history]),
+    );
+    const settingsByProject = new Map();
+    const result = { created: 0, updated: 0, skipped: metadata.length - candidates.length };
+
+    for (const nativeThread of candidates) {
+      const project = projectById.get(nativeThread.projectId);
+      const history = histories.get(nativeThread.threadId);
+      if (!project?.workspacePath || !history) {
+        result.skipped += 1;
+        continue;
+      }
+      const existing = this.database.getAiChatThreadByCodexThreadId(nativeThread.threadId);
+      let settings;
+      if (existing) {
+        settings = {
+          model: existing.model,
+          reasoningEffort: existing.reasoningEffort,
+          sandbox: existing.sandbox,
+        };
+      } else {
+        settings = settingsByProject.get(project.id);
+        if (!settings) {
+          const catalog = await this.getCatalog(project.id);
+          const model = catalog.models[0];
+          if (!model) {
+            throw new ApiError(503, "AI_MODEL_UNAVAILABLE", "Codex did not provide an available model");
+          }
+          settings = {
+            model: model.slug,
+            reasoningEffort: model.defaultReasoningEffort,
+            sandbox: "workspace-write",
+          };
+          settingsByProject.set(project.id, settings);
+        }
+      }
+
+      const localEvents = existing ? this.database.listAiChatEvents(existing.id) : [];
+      const outcome = this.database.upsertCodexAiChatThread({
+        title: nativeThread.generatedTitle ?? existing?.title ?? nativeThread.title,
+        origin: existing ? {
+          ...existing.origin,
+          projectName: project.name,
+          workspacePath: project.workspacePath,
+        } : {
+          projectId: project.id,
+          projectName: project.name,
+          workspacePath: project.workspacePath,
+        },
+        codexThreadId: nativeThread.threadId,
+        ...settings,
+        createdAt: nativeThread.createdAt,
+        updatedAt: nativeThread.updatedAt,
+        events: historyEventsWithoutLocalDuplicates(history.events, localEvents),
+      });
+      result[outcome.status] += 1;
+    }
+    return result;
   }
 
   async createThread(input) {
     const [catalog, resolved] = await Promise.all([
       this.getCatalog(input.projectId),
-      resolveAiWorkspace(input.projectId, this.codexStatePath, this.database),
+      resolveAiWorkspace(
+        input.projectId,
+        this.codexStatePath,
+        this.database,
+        this.resolveProjectDevice,
+      ),
     ]);
     const model = this.#resolveModel(catalog, input.model);
     const reasoningEffort = input.reasoningEffort ?? model.defaultReasoningEffort;
@@ -208,7 +328,12 @@ export class AiChatService {
 
     const [catalog, resolved] = await Promise.all([
       this.getCatalog(thread.origin.projectId),
-      resolveAiWorkspace(thread.origin.projectId, this.codexStatePath, this.database),
+      resolveAiWorkspace(
+        thread.origin.projectId,
+        this.codexStatePath,
+        this.database,
+        this.resolveProjectDevice,
+      ),
     ]);
 
     thread = this.getThread(threadId);

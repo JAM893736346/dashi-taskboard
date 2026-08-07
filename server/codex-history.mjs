@@ -2,8 +2,12 @@ import { spawn } from "node:child_process";
 
 const HISTORY_TIMEOUT_MS = 30_000;
 const HISTORY_MAX_LINE_BYTES = 16 * 1024 * 1024;
+const HISTORY_SOURCE_KINDS = ["cli", "vscode", "exec"];
 const ACTIVITY_GAP_MS = 60 * 60 * 1000;
 const ACTIVITY_READ_CONCURRENCY = 2;
+const CHAT_READ_CONCURRENCY = 2;
+const CHAT_MAX_LINE_BYTES = 128 * 1024 * 1024;
+const CHAT_TIMEOUT_MS = 90_000;
 const ACTIVITY_CACHE_LIMIT = 128;
 const activityCache = new Map();
 
@@ -44,6 +48,61 @@ function historyThread(value) {
   };
 }
 
+function chatHistoryThread(value) {
+  return {
+    ...historyThread(value),
+    generatedTitle: typeof value.name === "string" && value.name.trim()
+      ? value.name.trim()
+      : null,
+  };
+}
+
+function codexMessageText(item) {
+  if (item?.type === "userMessage" && Array.isArray(item.content)) {
+    const content = item.content
+      .filter((block) => block?.type === "text" && typeof block.text === "string")
+      .map((block) => block.text)
+      .join("\n")
+      .trim();
+    const wrappedMessage = /<user_message>\s*([\s\S]*?)\s*<\/user_message>/.exec(content);
+    return wrappedMessage ? wrappedMessage[1].trim() : content;
+  }
+  if (item?.type === "agentMessage" && typeof item.text === "string") {
+    return item.text.trim();
+  }
+  return "";
+}
+
+function codexChatEvents(threadId, thread) {
+  if (!thread || typeof thread !== "object" || !Array.isArray(thread.turns)) {
+    throw new Error(`Codex returned invalid history for thread '${threadId}'`);
+  }
+  let itemIndex = 0;
+  const events = [];
+  for (const turn of thread.turns) {
+    if (!turn || typeof turn !== "object" || !Array.isArray(turn.items)) continue;
+    const createdAt = typeof turn.startedAt === "number" && Number.isFinite(turn.startedAt)
+      ? timestampToIso(turn.startedAt, "turn startedAt")
+      : new Date(0).toISOString();
+    for (const item of turn.items) {
+      const index = itemIndex;
+      itemIndex += 1;
+      const content = codexMessageText(item);
+      if (!content) continue;
+      const role = item.type === "userMessage" ? "user" : "assistant";
+      events.push({
+        id: `codex-history:${threadId}:${typeof item.id === "string" ? item.id : index}`,
+        type: role === "user" ? "user_message" : "agent_message",
+        role,
+        content,
+        data: { source: "codex-history" },
+        createdAt,
+      });
+    }
+  }
+  return events;
+}
+
 function withCodexAppServer({
   codexExecutable,
   cwd,
@@ -52,6 +111,7 @@ function withCodexAppServer({
   timeoutMessage,
   exitAction,
   requestErrorMessage,
+  maxLineBytes = HISTORY_MAX_LINE_BYTES,
 }, operation) {
   return new Promise((resolve, reject) => {
     const child = spawn(codexExecutable, ["app-server", "--stdio"], {
@@ -106,7 +166,7 @@ function withCodexAppServer({
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
       buffer += chunk;
-      if (Buffer.byteLength(buffer) > HISTORY_MAX_LINE_BYTES) {
+      if (Buffer.byteLength(buffer) > maxLineBytes) {
         finish(new Error("Codex history response exceeded the line size limit"));
         return;
       }
@@ -152,6 +212,7 @@ async function listCodexThreadEntries(request) {
       limit: 100,
       sortKey: "created_at",
       sortDirection: "desc",
+      sourceKinds: HISTORY_SOURCE_KINDS,
       useStateDbOnly: true,
       ...(cursor === undefined ? {} : { cursor }),
     });
@@ -188,6 +249,70 @@ export function listCodexHistory({
       if (!threads.has(thread.threadId)) threads.set(thread.threadId, thread);
     }
     return [...threads.values()];
+  });
+}
+
+export function listCodexChatMetadata({
+  codexExecutable,
+  cwd,
+  processEnv = process.env,
+  timeoutMs = HISTORY_TIMEOUT_MS,
+}) {
+  return withCodexAppServer({
+    codexExecutable,
+    cwd,
+    processEnv,
+    timeoutMs,
+    timeoutMessage: "Timed out while reading Codex chat metadata",
+    exitAction: "listing chat metadata",
+    requestErrorMessage: "Codex app-server rejected a chat metadata request",
+  }, async (request) => {
+    const threads = new Map();
+    for (const value of await listCodexThreadEntries(request)) {
+      const thread = chatHistoryThread(value);
+      if (!threads.has(thread.threadId)) threads.set(thread.threadId, thread);
+    }
+    return [...threads.values()];
+  });
+}
+
+export function readCodexChatThreads({
+  codexExecutable,
+  cwd,
+  threadIds,
+  processEnv = process.env,
+  timeoutMs = CHAT_TIMEOUT_MS,
+}) {
+  return withCodexAppServer({
+    codexExecutable,
+    cwd,
+    processEnv,
+    timeoutMs,
+    timeoutMessage: "Timed out while reading Codex chat history",
+    exitAction: "reading chat history",
+    requestErrorMessage: "Codex app-server rejected a chat history request",
+    maxLineBytes: CHAT_MAX_LINE_BYTES,
+  }, async (request) => {
+    const uniqueThreadIds = [...new Set(threadIds)];
+    const results = new Array(uniqueThreadIds.length);
+    let nextThread = 0;
+    async function worker() {
+      while (nextThread < uniqueThreadIds.length) {
+        const index = nextThread;
+        nextThread += 1;
+        const threadId = uniqueThreadIds[index];
+        const result = await request("thread/read", { threadId, includeTurns: true });
+        results[index] = {
+          threadId,
+          events: codexChatEvents(threadId, result?.thread),
+        };
+      }
+    }
+    await Promise.all(Array.from(
+      { length: Math.min(CHAT_READ_CONCURRENCY, uniqueThreadIds.length) },
+      () => worker(),
+    ));
+    return results;
   });
 }
 

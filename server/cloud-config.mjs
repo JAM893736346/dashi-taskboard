@@ -18,6 +18,7 @@ function emptyConfig() {
     actorName: null,
     sharedKey: null,
     projectMappings: {},
+    codexProjectMappings: {},
   };
 }
 
@@ -82,6 +83,32 @@ function validateProjectMappings(value) {
   return projectMappings;
 }
 
+function validateCodexProjectMappings(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Codex project mappings are invalid");
+  }
+  const projectMappings = {};
+  for (const [projectId, codexProjectId] of Object.entries(value)) {
+    if (!projectId || typeof codexProjectId !== "string" || !codexProjectId.trim()) {
+      throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Codex project mappings are invalid");
+    }
+    projectMappings[projectId] = codexProjectId.trim();
+  }
+  return projectMappings;
+}
+
+function projectLinkFromConfig(config, taskboardProjectId) {
+  const workspacePath = config.projectMappings[taskboardProjectId];
+  if (!workspacePath) return null;
+  const codexProjectId = config.codexProjectMappings[taskboardProjectId] ?? null;
+  return {
+    taskboardProjectId,
+    workspacePath,
+    codexProjectId,
+    status: codexProjectId ? "synced" : "pending",
+  };
+}
+
 function parseConfig(value) {
   if (
     value === null
@@ -97,13 +124,15 @@ function parseConfig(value) {
     "actorName",
     "sharedKey",
     "projectMappings",
+    "codexProjectMappings",
   ]);
   if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
     throw new CloudConfigError("INVALID_CLOUD_CONFIG", "Cloud companion configuration is invalid");
   }
   const projectMappings = validateProjectMappings(value.projectMappings);
+  const codexProjectMappings = validateCodexProjectMappings(value.codexProjectMappings ?? {});
   if (value.remoteUrl === null && value.actorName === null && value.sharedKey === null) {
-    return { ...emptyConfig(), projectMappings };
+    return { ...emptyConfig(), projectMappings, codexProjectMappings };
   }
   const credentials = validateCredentials(value.actorName, value.sharedKey);
   return {
@@ -111,6 +140,7 @@ function parseConfig(value) {
     remoteUrl: normalizeCloudUrl(value.remoteUrl),
     ...credentials,
     projectMappings,
+    codexProjectMappings,
   };
 }
 
@@ -183,6 +213,46 @@ export function createCloudConfigStore({ configPath }) {
           [projectId]: workspacePath,
         },
       }));
+    },
+    async setProjectLink(projectId, { workspacePath, codexProjectId }) {
+      if (typeof projectId !== "string" || !projectId.trim()) {
+        throw new CloudConfigError("INVALID_PROJECT_MAPPING", "projectId is required");
+      }
+      if (typeof workspacePath !== "string" || !path.isAbsolute(workspacePath)) {
+        throw new CloudConfigError(
+          "INVALID_PROJECT_MAPPING",
+          "workspacePath must be absolute",
+        );
+      }
+      if (
+        codexProjectId !== null
+        && (typeof codexProjectId !== "string" || !codexProjectId.trim())
+      ) {
+        throw new CloudConfigError(
+          "INVALID_PROJECT_MAPPING",
+          "codexProjectId must be null or non-empty",
+        );
+      }
+      const config = await update((current) => {
+        const codexProjectMappings = { ...current.codexProjectMappings };
+        if (codexProjectId === null) delete codexProjectMappings[projectId];
+        else codexProjectMappings[projectId] = codexProjectId.trim();
+        return {
+          ...current,
+          projectMappings: {
+            ...current.projectMappings,
+            [projectId]: workspacePath,
+          },
+          codexProjectMappings,
+        };
+      });
+      return projectLinkFromConfig(config, projectId);
+    },
+    async listProjectLinks() {
+      await pendingWrite;
+      const config = await readFromDisk();
+      return Object.keys(config.projectMappings)
+        .map((projectId) => projectLinkFromConfig(config, projectId));
     },
   };
 }

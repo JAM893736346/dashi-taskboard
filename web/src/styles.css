@@ -6444,6 +6444,104 @@ kbd {
   background: rgba(13, 14, 16, 0.36);
 }
 
+.project-create-dialog {
+  width: min(520px, calc(100vw - 32px));
+  padding: 0;
+  overflow: hidden;
+  border: var(--border-hairline) solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-primary);
+  box-shadow: var(--dialog-shadow);
+}
+
+.project-create-dialog::backdrop {
+  background: rgba(13, 14, 16, 0.36);
+}
+
+.project-create-dialog form {
+  display: flex;
+  flex-direction: column;
+}
+
+.project-create-header,
+.project-create-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+}
+
+.project-create-header {
+  border-bottom: var(--border-hairline) solid var(--border);
+  font-size: 13px;
+}
+
+.project-create-body {
+  display: grid;
+  gap: 14px;
+  padding: 18px 20px;
+}
+
+.project-create-body > label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 550;
+}
+
+.project-create-body input {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: var(--border-hairline) solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.project-create-body input[readonly] {
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+}
+
+.project-create-directory {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 6px;
+}
+
+.project-create-directory .icon-button {
+  width: 34px;
+  height: 34px;
+  border: var(--border-hairline) solid var(--border-strong);
+  background: var(--surface);
+}
+
+.project-create-footer {
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: var(--border-hairline) solid var(--border);
+}
+
+.project-sync-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.project-sync-status.is-pending {
+  color: var(--warning);
+}
+
+.project-sync-status.is-synced {
+  color: var(--success);
+}
+
 .codex-history-header,
 .codex-history-footer {
   display: flex;

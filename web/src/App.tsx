@@ -11,7 +11,6 @@ import {
   type Dispatch,
   type SetStateAction,
 } from "react";
-import { buildCodexHistoryPreview } from "../../shared/codex-history-import.mjs";
 import {
   ApiError,
   addTaskRelation,
@@ -21,19 +20,20 @@ import {
   getTaskboardRevision,
   getWorkflowWorkspace,
   getTaskboardMetadata,
-  importCodexHistory,
-  listCodexHistory,
   listDevelopmentContexts,
   listDeviceWorkspaces,
-  listImportedCodexThreadIds,
+  listProjectDeviceLinks,
   listProjects,
   listTasks,
   moveTask as moveTaskRequest,
   removeTaskRelation,
+  reconcileProjectDeviceLink,
   restoreTask as restoreTaskRequest,
   setCurrentUserActor,
+  saveProjectDeviceLink,
   uploadAttachment,
   updateTask as updateTaskRequest,
+  syncAiChats,
 } from "./api";
 import {
   actorForAssigneeTarget,
@@ -44,6 +44,7 @@ import { AiChat } from "./components/AiChat";
 import { AutomaticProcessingMenu } from "./components/AutomaticProcessingMenu";
 import { BoardSettingsMenu } from "./components/BoardSettingsMenu";
 import { CodexHistorySyncDialog } from "./components/CodexHistorySyncDialog";
+import { ProjectCreateDialog } from "./components/ProjectCreateDialog";
 import { HiddenColumns } from "./components/HiddenColumns";
 import {
   resolveInlineMediaMarkdown,
@@ -72,6 +73,7 @@ import {
   type HostContext,
   type IssueRelationType,
   type Project,
+  type ProjectDeviceLink,
   type Task,
   type TaskboardMetadata,
   type TaskDraft,
@@ -113,6 +115,9 @@ interface ProjectChoice {
   issueCount: number;
   inCodex: boolean;
   persisted: boolean;
+  codexProjectId: string | null;
+  workspacePath: string | null;
+  syncStatus: ProjectDeviceLink["status"] | null;
 }
 
 interface UndoOperation {
@@ -387,7 +392,10 @@ export function App() {
   const [boardView, setBoardView] = useState<BoardView>("issues");
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [codexHistorySyncOpen, setCodexHistorySyncOpen] = useState(false);
+  const [projectCreateOpen, setProjectCreateOpen] = useState(false);
   const [codexHistorySyncRequest, setCodexHistorySyncRequest] = useState(embedded ? 0 : 1);
+  const [aiChatSyncRevision, setAiChatSyncRevision] = useState(0);
+  const [workspaceRegistrationRequest, setWorkspaceRegistrationRequest] = useState(0);
   const [detailTaskIdentifier, setDetailTaskIdentifier] = useState<string | null>(
     () => readIssueIdentifier(window.location.search),
   );
@@ -405,7 +413,8 @@ export function App() {
   const [openingThreadTaskId, setOpeningThreadTaskId] = useState<string | null>(null);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [favoriteProjectIds, setFavoriteProjectIds] = useState(readFavoriteProjectIds);
-  const [deviceWorkspacePaths, setDeviceWorkspacePaths] = useState(readDeviceWorkspacePaths);
+  const [projectDeviceLinks, setProjectDeviceLinks] = useState<ProjectDeviceLink[]>([]);
+  const [nativeWorkspacePaths, setNativeWorkspacePaths] = useState<Record<string, string>>({});
   const [announcement, setAnnouncementValue] = useState("");
   const [undoNotice, setUndoNotice] = useState<UndoNotice | null>(null);
   const tasksRequestRef = useRef(0);
@@ -414,6 +423,7 @@ export function App() {
   const undoStackRef = useRef<UndoOperation[]>([]);
   const undoInFlightRef = useRef(false);
   const codexHistorySyncStartedRef = useRef(0);
+  const registrationInFlightRef = useRef(new Set<string>());
   const dragRegionRef = useRef<HTMLDivElement>(null);
   const selectedProjectIdRef = useRef(selectedProjectId);
   selectedProjectIdRef.current = selectedProjectId;
@@ -425,19 +435,58 @@ export function App() {
     setAnnouncementValue(message);
   }, []);
 
-  const rememberDeviceWorkspacePath = useCallback((projectId: string, workspacePath: string) => {
-    const normalizedPath = workspacePath.trim();
-    setDeviceWorkspacePaths((current) => {
-      if (current[projectId] === normalizedPath || (!normalizedPath && !(projectId in current))) {
-        return current;
-      }
-      const next = { ...current };
-      if (normalizedPath) next[projectId] = normalizedPath;
-      else delete next[projectId];
-      window.localStorage.setItem(DEVICE_WORKSPACE_PATHS_KEY, JSON.stringify(next));
-      return next;
-    });
+  const upsertProjectDeviceLink = useCallback((link: ProjectDeviceLink) => {
+    setProjectDeviceLinks((current) => [
+      link,
+      ...current.filter((candidate) => candidate.taskboardProjectId !== link.taskboardProjectId),
+    ]);
   }, []);
+
+  const projectLinkByTaskboardId = useMemo(
+    () => new Map(projectDeviceLinks.map((link) => [link.taskboardProjectId, link])),
+    [projectDeviceLinks],
+  );
+  const projectLinkByCodexId = useMemo(
+    () => new Map(projectDeviceLinks.flatMap((link) => (
+      link.codexProjectId ? [[link.codexProjectId, link] as const] : []
+    ))),
+    [projectDeviceLinks],
+  );
+  const deviceWorkspacePaths = useMemo(() => {
+    const next = { ...nativeWorkspacePaths };
+    for (const link of projectDeviceLinks) next[link.taskboardProjectId] = link.workspacePath;
+    return next;
+  }, [nativeWorkspacePaths, projectDeviceLinks]);
+
+  const rememberDeviceWorkspacePath = useCallback(async (projectId: string, workspacePath: string) => {
+    const normalizedPath = workspacePath.trim();
+    if (!normalizedPath) return;
+    const existing = projectLinkByTaskboardId.get(projectId);
+    if (existing?.workspacePath === normalizedPath) return;
+    try {
+      const link = await saveProjectDeviceLink(projectId, {
+        workspacePath: normalizedPath,
+        codexProjectId: existing?.codexProjectId ?? null,
+      });
+      upsertProjectDeviceLink(link);
+    } catch (error) {
+      setActionError(errorMessage(error));
+    }
+  }, [projectLinkByTaskboardId, upsertProjectDeviceLink]);
+
+  const registerWorkspace = useCallback((link: ProjectDeviceLink) => {
+    if (!embedded || window.parent === window || registrationInFlightRef.current.has(link.taskboardProjectId)) {
+      return;
+    }
+    registrationInFlightRef.current.add(link.taskboardProjectId);
+    window.parent.postMessage({
+      type: "taskboard:register-workspace",
+      payload: {
+        taskboardProjectId: link.taskboardProjectId,
+        workspacePath: link.workspacePath,
+      },
+    }, "*");
+  }, [embedded]);
 
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
   const currentUser = hostContext?.user ?? DEFAULT_USER_ACTOR;
@@ -445,17 +494,21 @@ export function App() {
   const automaticProcessingWorkspacePaths = useMemo(() => {
     const next = { ...deviceWorkspacePaths };
     if (hostContext?.workspacePath) {
-      const taskboardProjectId = projects.some((project) => project.id === hostContext.projectId)
+      const linkedProjectId = hostContext.projectId
+        ? projectLinkByCodexId.get(hostContext.projectId)?.taskboardProjectId
+        : null;
+      const taskboardProjectId = linkedProjectId
+        ?? (projects.some((project) => project.id === hostContext.projectId)
         ? hostContext.projectId
         : projects.some((project) => project.id === "local")
           ? "local"
-          : null;
+          : null);
       if (taskboardProjectId && !next[taskboardProjectId]) {
         next[taskboardProjectId] = hostContext.workspacePath;
       }
     }
     return next;
-  }, [deviceWorkspacePaths, hostContext?.projectId, hostContext?.workspacePath, projects]);
+  }, [deviceWorkspacePaths, hostContext?.projectId, hostContext?.workspacePath, projectLinkByCodexId, projects]);
   const detailTask = detailTaskIdentifier
     ? tasks.find((task) => task.identifier === detailTaskIdentifier) ?? null
     : null;
@@ -475,30 +528,43 @@ export function App() {
     const seen = new Set<string>();
     const choices: ProjectChoice[] = [];
     for (const project of hostContext?.projects ?? []) {
-      if (!project.id || !project.name || seen.has(project.id)) continue;
-      seen.add(project.id);
+      if (!project.id || !project.name) continue;
+      const link = projectLinkByCodexId.get(project.id);
+      const taskboardProjectId = link?.taskboardProjectId ?? project.id;
+      if (seen.has(taskboardProjectId)) continue;
+      const persisted = persistedById.get(taskboardProjectId);
+      seen.add(taskboardProjectId);
       choices.push({
-        id: project.id,
-        name: persistedById.get(project.id)?.name ?? project.name,
-        issueCount: persistedById.get(project.id)?.issueCount ?? 0,
+        id: taskboardProjectId,
+        name: persisted?.name ?? project.name,
+        issueCount: persisted?.issueCount ?? 0,
         inCodex: true,
-        persisted: persistedById.has(project.id),
+        persisted: Boolean(persisted),
+        codexProjectId: project.id,
+        workspacePath: link?.workspacePath ?? nativeWorkspacePaths[project.id] ?? persisted?.workspacePath ?? null,
+        syncStatus: "synced",
       });
     }
     for (const project of projects) {
       if (seen.has(project.id)) continue;
+      const link = projectLinkByTaskboardId.get(project.id);
+      const nativeProjectId = link?.codexProjectId
+        ?? (hostContext?.projects?.some((candidate) => candidate.id === project.id) ? project.id : null);
       choices.push({
         id: project.id,
         name: project.name,
         issueCount: project.issueCount,
-        inCodex: false,
+        inCodex: Boolean(nativeProjectId),
         persisted: true,
+        codexProjectId: nativeProjectId,
+        workspacePath: link?.workspacePath ?? project.workspacePath,
+        syncStatus: link?.status ?? (nativeProjectId ? "synced" : project.workspacePath ? "pending" : null),
       });
     }
     return choices.sort((left, right) => (
       Number(favoriteProjectIds.has(right.id)) - Number(favoriteProjectIds.has(left.id))
     ));
-  }, [favoriteProjectIds, hostContext?.projects, projects]);
+  }, [favoriteProjectIds, hostContext?.projects, nativeWorkspacePaths, projectLinkByCodexId, projectLinkByTaskboardId, projects]);
   const projectsWithIssues = useMemo(
     () => projectChoices.filter((project) => project.issueCount > 0),
     [projectChoices],
@@ -595,7 +661,46 @@ export function App() {
       const message = event.data as { type?: string; payload?: unknown; theme?: unknown };
 
       if (message.type === "taskboard:opened") {
+        registrationInFlightRef.current.clear();
         setCodexHistorySyncRequest((current) => current + 1);
+        setWorkspaceRegistrationRequest((current) => current + 1);
+        return;
+      }
+
+      if (message.type === "taskboard:workspace-registered" && message.payload) {
+        const payload = message.payload as {
+          taskboardProjectId?: unknown;
+          workspacePath?: unknown;
+        };
+        if (
+          typeof payload.taskboardProjectId === "string"
+          && typeof payload.workspacePath === "string"
+        ) {
+          void reconcileProjectDeviceLink(
+            payload.taskboardProjectId,
+            payload.workspacePath,
+          ).then((link) => {
+            upsertProjectDeviceLink(link);
+            if (link.status === "synced") {
+              registrationInFlightRef.current.delete(link.taskboardProjectId);
+              setAnnouncement("已同步到 Codex");
+            }
+          }).catch((error) => {
+            registrationInFlightRef.current.delete(payload.taskboardProjectId as string);
+            setActionError(errorMessage(error));
+          });
+        }
+        return;
+      }
+
+      if (message.type === "taskboard:workspace-registration-failed" && message.payload) {
+        const payload = message.payload as { taskboardProjectId?: unknown; message?: unknown };
+        if (typeof payload.taskboardProjectId === "string") {
+          registrationInFlightRef.current.delete(payload.taskboardProjectId);
+        }
+        setActionError(
+          typeof payload.message === "string" ? payload.message : "无法同步到 Codex。",
+        );
         return;
       }
 
@@ -628,7 +733,7 @@ export function App() {
     return () => {
       window.removeEventListener("message", receiveHostMessage);
     };
-  }, [embedded]);
+  }, [embedded, setAnnouncement, upsertProjectDeviceLink]);
 
   useLayoutEffect(() => {
     if (!embedded || window.parent === window || !dragRegionRef.current) return;
@@ -655,11 +760,27 @@ export function App() {
     setProjectsLoading(true);
     setLoadError(null);
     try {
-      const [nextProjects, metadata, workspaces] = await Promise.all([
+      const [nextProjects, metadata, workspaces, storedLinks] = await Promise.all([
         listProjects(signal),
         getTaskboardMetadata(signal),
         listDeviceWorkspaces(signal),
+        listProjectDeviceLinks(signal),
       ]);
+      const legacyPaths = readDeviceWorkspacePaths();
+      const linkedProjectIds = new Set(storedLinks.map((link) => link.taskboardProjectId));
+      const migratedLinks = await Promise.all(nextProjects.flatMap((project) => {
+        const workspacePath = legacyPaths[project.id];
+        if (!workspacePath || linkedProjectIds.has(project.id)) return [];
+        const codexProjectId = Object.entries(workspaces)
+          .find(([, candidate]) => candidate === workspacePath)?.[0] ?? null;
+        return [saveProjectDeviceLink(project.id, { workspacePath, codexProjectId })];
+      }));
+      const nextLinks = [
+        ...migratedLinks,
+        ...storedLinks.filter((link) => !migratedLinks.some(
+          (migrated) => migrated.taskboardProjectId === link.taskboardProjectId,
+        )),
+      ];
       setTaskboardMetadata((current) => (
         current
         && current.mode === metadata.mode
@@ -672,12 +793,8 @@ export function App() {
       ));
       setManageTaskboardSkillPath(metadata.manageTaskboardSkillPath ?? "");
       setLocalAiChatAvailable(metadata.capabilities?.localAiChat === true);
-      setDeviceWorkspacePaths((current) => {
-        const next = { ...current, ...workspaces };
-        if (JSON.stringify(next) === JSON.stringify(current)) return current;
-        window.localStorage.setItem(DEVICE_WORKSPACE_PATHS_KEY, JSON.stringify(next));
-        return next;
-      });
+      setNativeWorkspacePaths(workspaces);
+      setProjectDeviceLinks(nextLinks);
       setProjects(nextProjects);
       setSelectedProjectId((current) => {
         const fromQuery = new URLSearchParams(window.location.search).get("project");
@@ -702,11 +819,55 @@ export function App() {
 
   const refreshProjectList = useCallback(async () => {
     try {
-      setProjects(await listProjects());
+      const [nextProjects, links, workspaces] = await Promise.all([
+        listProjects(),
+        listProjectDeviceLinks(),
+        listDeviceWorkspaces(),
+      ]);
+      setProjects(nextProjects);
+      setProjectDeviceLinks(links);
+      setNativeWorkspacePaths(workspaces);
     } catch (error) {
       setLoadError(errorMessage(error));
     }
   }, []);
+
+  useEffect(() => {
+    if (!hostContext?.projectId || !hostContext.workspacePath) return;
+    const linked = projectLinkByCodexId.get(hostContext.projectId);
+    const taskboardProjectId = linked?.taskboardProjectId
+      ?? (projects.some((project) => project.id === hostContext.projectId)
+        ? hostContext.projectId
+        : projects.some((project) => project.id === "local") ? "local" : null);
+    if (!taskboardProjectId) return;
+    const current = projectLinkByTaskboardId.get(taskboardProjectId);
+    if (
+      current?.workspacePath === hostContext.workspacePath
+      && current.codexProjectId === hostContext.projectId
+    ) return;
+    void saveProjectDeviceLink(taskboardProjectId, {
+      workspacePath: hostContext.workspacePath,
+      codexProjectId: hostContext.projectId,
+    }).then(upsertProjectDeviceLink).catch(() => {});
+  }, [
+    hostContext?.projectId,
+    hostContext?.workspacePath,
+    projectLinkByCodexId,
+    projectLinkByTaskboardId,
+    projects,
+    upsertProjectDeviceLink,
+  ]);
+
+  useEffect(() => {
+    if (workspaceRegistrationRequest === 0 || !selectedProjectId) return;
+    const link = projectLinkByTaskboardId.get(selectedProjectId);
+    if (link?.status === "pending") registerWorkspace(link);
+  }, [
+    projectLinkByTaskboardId,
+    registerWorkspace,
+    selectedProjectId,
+    workspaceRegistrationRequest,
+  ]);
 
   const refreshTasks = useCallback(async (
     projectId: string,
@@ -738,40 +899,15 @@ export function App() {
     ) return;
 
     codexHistorySyncStartedRef.current = codexHistorySyncRequest;
-    void Promise.all([
-      listCodexHistory(),
-      listImportedCodexThreadIds(),
-    ]).then(async ([threads, existingThreadIds]) => {
-      const importTasks = buildCodexHistoryPreview(
-        threads,
-        codexImportProjects,
-        existingThreadIds,
-      ).flatMap((item) => (
-        item.existing || !item.matchedProjectId
-          ? []
-          : [{
-              threadId: item.threadId,
-              projectId: item.matchedProjectId,
-              title: item.title,
-              description: item.description,
-              createdAt: item.createdAt,
-              updatedAt: item.updatedAt,
-            }]
-      ));
-      if (importTasks.length === 0) return;
-
-      const result = await importCodexHistory(importTasks);
-      if (result.imported === 0) return;
-      await refreshProjectList();
-      const projectId = selectedProjectIdRef.current;
-      if (projectId) await refreshTasks(projectId, { quiet: true });
+    void syncAiChats().then((result) => {
+      if (result.created > 0 || result.updated > 0) {
+        setAiChatSyncRevision((current) => current + 1);
+      }
     }).catch(() => {});
   }, [
     codexHistorySyncRequest,
     codexImportProjects,
     projectsLoading,
-    refreshProjectList,
-    refreshTasks,
   ]);
 
   useEffect(() => {
@@ -812,7 +948,8 @@ export function App() {
       return;
     }
     const controller = new AbortController();
-    const codexProjectId = selectedProjectId === "local" ? hostContext?.projectId : selectedProjectId;
+    const codexProjectId = projectLinkByTaskboardId.get(selectedProjectId)?.codexProjectId
+      ?? (hostContext?.projectId === selectedProjectId ? hostContext.projectId : undefined);
     const codexThreadId = hostContext?.threadId ?? detailTask?.threadId ?? undefined;
     setDevelopmentScan({ workspacePath: selectedDeviceWorkspacePath ?? null, contexts: [] });
     setDevelopmentScanLoading(true);
@@ -825,7 +962,7 @@ export function App() {
     )
       .then((scan) => {
         setDevelopmentScan(scan);
-        if (scan.workspacePath) rememberDeviceWorkspacePath(selectedProjectId, scan.workspacePath);
+        if (scan.workspacePath) void rememberDeviceWorkspacePath(selectedProjectId, scan.workspacePath);
       })
       .catch((error) => {
         if ((error as Error).name !== "AbortError") {
@@ -840,6 +977,7 @@ export function App() {
     detailTask?.threadId,
     hostContext?.projectId,
     hostContext?.threadId,
+    projectLinkByTaskboardId,
     rememberDeviceWorkspacePath,
     selectedProjectId,
     selectedDeviceWorkspacePath,
@@ -1326,8 +1464,10 @@ export function App() {
     const worktreePath = task.developmentContext?.type === "worktree"
       ? task.developmentContext.path
       : null;
+    const selectedProjectLink = projectLinkByTaskboardId.get(selectedProjectId);
     const workspacePath = worktreePath
-      ?? selectedDeviceWorkspacePath
+      ?? selectedProjectLink?.workspacePath
+      ?? selectedProject?.workspacePath
       ?? developmentScan.workspacePath
       ?? hostContext?.workspacePath;
     const instruction = `e-taskboard Addressing the issues mentioned in ${task.identifier}`;
@@ -1341,7 +1481,6 @@ export function App() {
       return;
     }
     if (openingThreadTaskId) return;
-    const codexProject = hostContext?.projects?.find((project) => project.id === selectedProject?.id);
     setOpeningThreadTaskId(task.id);
     setActionError(null);
     window.parent.postMessage({
@@ -1353,7 +1492,7 @@ export function App() {
         skillName: "manage-taskboard",
         skillDisplayName: "Manage Taskboard",
         skillPath: manageTaskboardSkillPath,
-        codexProjectId: codexProject?.id ?? (selectedProject?.id === "local" ? hostContext?.projectId : selectedProject?.id),
+        codexProjectId: selectedProjectLink?.codexProjectId,
         projectName: selectedProject?.name,
         workspacePath,
         workspaceLabel: worktreePath ? workspaceName(worktreePath) : undefined,
@@ -1417,7 +1556,7 @@ export function App() {
           project = await createProjectRequest({
             id: choice.id,
             name: choice.name,
-            workspacePath: null,
+            workspacePath: choice.workspacePath,
           });
           setProjects((current) => [...current, project!]);
         } catch (error) {
@@ -1427,6 +1566,14 @@ export function App() {
           project = nextProjects.find((candidate) => candidate.id === choice.id) ?? null;
           if (!project) throw error;
         }
+      }
+      if (choice.workspacePath) {
+        const link = await saveProjectDeviceLink(project.id, {
+          workspacePath: choice.workspacePath,
+          codexProjectId: choice.codexProjectId,
+        });
+        upsertProjectDeviceLink(link);
+        if (link.status === "pending") registerWorkspace(link);
       }
       changeProject(project.id);
     } catch (error) {
@@ -1736,6 +1883,14 @@ export function App() {
                 />
                 <button
                   type="button"
+                  className="button primary"
+                  onClick={() => setProjectCreateOpen(true)}
+                >
+                  <LinearIcon name="folder" />
+                  创建项目
+                </button>
+                <button
+                  type="button"
                   className="button secondary project-history-sync"
                   disabled={projects.length === 0}
                   onClick={() => setCodexHistorySyncOpen(true)}
@@ -1779,6 +1934,12 @@ export function App() {
                                   {project.inCodex ? "Codex 项目" : "已保存的项目"}
                                   {project.issueCount > 0 ? ` · ${project.issueCount} 个议题` : ""}
                                 </span>
+                                {project.syncStatus && (
+                                  <span className={`project-sync-status is-${project.syncStatus}`}>
+                                    <LinearIcon name={project.syncStatus === "synced" ? "check" : "statusBacklog"} />
+                                    {project.syncStatus === "synced" ? "已同步到 Codex" : "等待 Codex 同步"}
+                                  </span>
+                                )}
                               </span>
                               {favoriteProjectIds.has(project.id) && <span className="project-card-favorite" aria-label="已收藏"><LinearIcon name="favorite" /></span>}
                               <span className="project-card-action" aria-hidden="true">
@@ -1788,12 +1949,12 @@ export function App() {
                             <label className="project-card-directory">
                               <LinearIcon name="folder" />
                               <input
-                                key={deviceWorkspacePaths[project.id] ?? ""}
+                                key={project.workspacePath ?? ""}
                                 type="text"
-                                defaultValue={deviceWorkspacePaths[project.id] ?? ""}
+                                defaultValue={project.workspacePath ?? ""}
                                 placeholder="设置此设备的项目目录"
                                 aria-label={`${project.name} 在此设备上的项目目录`}
-                                onBlur={(event) => rememberDeviceWorkspacePath(project.id, event.currentTarget.value)}
+                                onBlur={(event) => void rememberDeviceWorkspacePath(project.id, event.currentTarget.value)}
                                 onKeyDown={(event) => {
                                   if (event.key === "Enter") event.currentTarget.blur();
                                 }}
@@ -1812,7 +1973,7 @@ export function App() {
               <div className="project-home-empty">
                 <span className="empty-orbit" aria-hidden="true"><i /><i /></span>
                 <h2>还没有项目</h2>
-                <p>在 Codex 中创建项目后，再打开任务面板。</p>
+                <p>创建项目，或从 Codex 中选择一个已有项目。</p>
               </div>
             )}
             {!projectsLoading && (
@@ -1962,6 +2123,21 @@ export function App() {
         />
       )}
 
+      <ProjectCreateDialog
+        open={projectCreateOpen}
+        onClose={() => setProjectCreateOpen(false)}
+        onCreated={(result) => {
+          setProjectCreateOpen(false);
+          setProjects((current) => [
+            result.project,
+            ...current.filter((project) => project.id !== result.project.id),
+          ]);
+          upsertProjectDeviceLink(result.link);
+          changeProject(result.project.id);
+          if (result.link.status === "pending") registerWorkspace(result.link);
+        }}
+      />
+
       {contextMenu && contextMenuTask && (
         <TaskContextMenu
           task={contextMenuTask}
@@ -1991,6 +2167,7 @@ export function App() {
         available={localAiChatAvailable}
         projectId={selectedProjectId || null}
         issueId={detailTaskId}
+        syncRevision={aiChatSyncRevision}
       />
 
       <div className="sr-only" role="status" aria-live="polite">{announcement}</div>

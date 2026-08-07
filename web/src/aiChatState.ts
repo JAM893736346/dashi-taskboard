@@ -17,6 +17,15 @@ export interface AiChatRouteState {
 
 export const AI_CHAT_SKILL_MARKER = "\uFFFC";
 
+export function promptChatTitle(message: string): string | undefined {
+  const firstLine = message
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!firstLine) return undefined;
+  return Array.from(firstLine.replace(/\s+/g, " ")).slice(0, 32).join("");
+}
+
 export function parseAiChatComposerFragment(
   raw: string,
   validSkillIds: Iterable<string>,
