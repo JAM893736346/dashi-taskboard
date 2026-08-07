@@ -555,7 +555,7 @@ export class WorkflowStore {
     return this.#statement(`
       SELECT * FROM workflow_revisions
       WHERE task_id = ?
-      ORDER BY created_at DESC, id DESC
+      ORDER BY created_at DESC, rowid DESC
     `).all(taskId).map(revisionFromRow);
   }
 
