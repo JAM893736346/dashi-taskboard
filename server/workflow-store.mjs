@@ -753,7 +753,7 @@ export class WorkflowStore {
     return this.#statement(`
       SELECT * FROM workflow_runs
       WHERE status IN (${placeholders})
-      ORDER BY created_at, id
+      ORDER BY created_at, rowid
     `).all(...ACTIVE_RUN_STATUSES).map(runFromRow);
   }
 
