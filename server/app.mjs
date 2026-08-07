@@ -36,6 +36,7 @@ import {
   isLocalCompanionRoute,
 } from "./cloud-proxy.mjs";
 import { ApiError, TaskboardDatabase } from "./database.mjs";
+import { WorkflowStore } from "./workflow-store.mjs";
 import {
   ProjectWorkspaceError,
   chooseProjectParent,
@@ -1446,6 +1447,7 @@ export function resolveHost(value = process.env.CODEX_TASKBOARD_HOST ?? "0.0.0.0
 export function createTaskboardServer(options = {}) {
   const resolved = resolveServerOptions(options);
   const database = new TaskboardDatabase(resolved.databasePath);
+  const workflowStore = options.workflowStore ?? new WorkflowStore(database);
   const events = new EventHub();
   const cloudConfig = options.cloudConfigStore ?? createCloudConfigStore({
     configPath: resolved.cloudConfigPath,
@@ -2540,6 +2542,7 @@ export function createTaskboardServer(options = {}) {
   let listening = false;
   return {
     database,
+    workflowStore,
     aiChat,
     dispatcher,
     server,
@@ -2586,6 +2589,7 @@ export function createTaskboardServer(options = {}) {
       await aiChat.close();
       await serverClosed;
       listening = false;
+      workflowStore.close();
       database.close();
     },
   };
