@@ -492,6 +492,7 @@ export interface IssueWorkflowSnapshot {
   templates: WorkflowTemplateSummary[];
   revisions: WorkflowRevision[];
   activeRun: WorkflowRunSnapshot | null;
+  latestRun: WorkflowRunSnapshot | null;
 }
 
 export interface WorkflowRunSnapshot {

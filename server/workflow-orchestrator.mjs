@@ -51,6 +51,11 @@ function isBlockingFailure(node) {
     || (node.status === "cancelled" && node.result?.reason === "user_cancelled");
 }
 
+function canDispatchQueuedTurn(snapshot) {
+  return ACTIVE_RUN_STATUSES.has(snapshot.run.status)
+    && !(snapshot.run.failFast && snapshot.nodes.some(isBlockingFailure));
+}
+
 function errorPayload(error) {
   return {
     code: typeof error?.code === "string" ? error.code : "WORKFLOW_EXECUTOR_FAILED",
@@ -287,7 +292,11 @@ export class WorkflowOrchestrator {
     if (this.reconcilePromise) return this.reconcilePromise;
     const reconcile = this.#drainWakeLoop();
     const tracked = reconcile.finally(() => {
-      if (this.reconcilePromise === tracked) this.reconcilePromise = null;
+      if (this.reconcilePromise !== tracked) return;
+      this.reconcilePromise = null;
+      if (this.dirty && !this.closed && !this.recovering) {
+        void this.wake("drain-follow-up").catch((error) => console.error(error));
+      }
     });
     this.reconcilePromise = tracked;
     return this.reconcilePromise;
@@ -329,10 +338,15 @@ export class WorkflowOrchestrator {
       templateRevisionRecord: this.store.getTemplateRevision(revision.templateRevisionId),
     }));
     const activeRun = this.store.getActiveRunForTask(task.id);
+    const latestRun = this.store.getLatestRunForTask(task.id);
+    const activeRunSnapshot = activeRun ? this.getRunSnapshot(activeRun.id) : null;
     return {
       templates,
       revisions,
-      activeRun: activeRun ? this.getRunSnapshot(activeRun.id) : null,
+      activeRun: activeRunSnapshot,
+      latestRun: latestRun?.id === activeRun?.id
+        ? activeRunSnapshot
+        : latestRun ? this.getRunSnapshot(latestRun.id) : null,
     };
   }
 
@@ -1468,6 +1482,7 @@ export class WorkflowOrchestrator {
     if (this.activeQueuedTurns.has(context.node.id)) return;
     this.activeQueuedTurns.add(context.node.id);
     try {
+      if (!canDispatchQueuedTurn(this.getRunSnapshot(context.run.id))) return;
       const prepared = this.store.prepareQueuedTurn({
         attemptId: context.attempt.id,
         messageId: message.id,
@@ -1479,6 +1494,7 @@ export class WorkflowOrchestrator {
       ))?.data?.effort ?? snapshot.effectiveGraph.defaults.effort;
       let dispatched = false;
       try {
+        if (!canDispatchQueuedTurn(this.getRunSnapshot(context.run.id))) return;
         dispatched = true;
         const started = await this.codex.startTurn(prepared.attempt.threadId, {
           input: [{ type: "text", text: queuedTurnPrompt(prepared.message) }],

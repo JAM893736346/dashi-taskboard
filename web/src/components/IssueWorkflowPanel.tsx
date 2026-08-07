@@ -42,6 +42,8 @@ const RUN_STATUS_LABELS: Record<WorkflowRunStatus, string> = {
   cancelled: "已取消",
 };
 
+const ACTIVE_RUN_STATUSES = new Set<WorkflowRunStatus>(["queued", "running", "paused"]);
+
 function messageFor(error: unknown): string {
   if (error instanceof ApiError) return error.message;
   if (error instanceof Error) return error.message;
@@ -108,6 +110,7 @@ export function IssueWorkflowPanel({
     ?? selectedRevision?.validationErrors
     ?? [];
   const activeRun = snapshot?.activeRun ?? null;
+  const visibleRun = activeRun ?? snapshot?.latestRun ?? null;
 
   async function generateRevision() {
     if (!selectedTemplateId) return;
@@ -134,7 +137,7 @@ export function IssueWorkflowPanel({
     setPendingAction("enqueue");
     try {
       const run = await enqueueWorkflowRevision(selectedRevision.id);
-      setSnapshot((current) => current ? { ...current, activeRun: run } : current);
+      setSnapshot((current) => current ? { ...current, activeRun: run, latestRun: run } : current);
       onAnnounce(`Workflow 修订版 ${selectedRevision.revision} 已放入待办队列。`);
     } catch (error) {
       onError(messageFor(error));
@@ -256,20 +259,20 @@ export function IssueWorkflowPanel({
             )}
           </section>
 
-          {activeRun && (
+          {visibleRun && (
             <section className="issue-workflow-run" aria-labelledby="workflow-run-heading">
               <header>
                 <div>
                   <span>持久化运行</span>
-                  <h2 id="workflow-run-heading">运行修订版 {activeRun.run.workflowRevision}</h2>
+                  <h2 id="workflow-run-heading">运行修订版 {visibleRun.run.workflowRevision}</h2>
                 </div>
-                <span className={`workflow-state is-${activeRun.run.status}`}>
-                  {RUN_STATUS_LABELS[activeRun.run.status]}
+                <span className={`workflow-state is-${visibleRun.run.status}`}>
+                  {RUN_STATUS_LABELS[visibleRun.run.status]}
                 </span>
               </header>
               <div className="issue-workflow-runtime">
                 <WorkflowRunGraph
-                  snapshot={activeRun}
+                  snapshot={visibleRun}
                   selectedNodeRunId={selectedNodeRunId}
                   onSelectNode={(nodeRunId, tab) => {
                     setSelectedNodeRunId(nodeRunId);
@@ -277,10 +280,14 @@ export function IssueWorkflowPanel({
                   }}
                 />
                 <WorkflowRunInspector
-                  snapshot={activeRun}
+                  snapshot={visibleRun}
                   selectedNodeRunId={selectedNodeRunId}
                   initialTab={inspectorTab}
-                  onSnapshotChange={(nextRun) => setSnapshot((current) => current ? { ...current, activeRun: nextRun } : current)}
+                  onSnapshotChange={(nextRun) => setSnapshot((current) => current ? {
+                    ...current,
+                    activeRun: ACTIVE_RUN_STATUSES.has(nextRun.run.status) ? nextRun : null,
+                    latestRun: nextRun,
+                  } : current)}
                   onOpenThread={onOpenThread}
                   onError={onError}
                   onAnnounce={onAnnounce}

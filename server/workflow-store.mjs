@@ -609,6 +609,15 @@ export class WorkflowStore {
     `).get(taskId, ...ACTIVE_RUN_STATUSES));
   }
 
+  getLatestRunForTask(taskId) {
+    return runFromRow(this.#statement(`
+      SELECT * FROM workflow_runs
+      WHERE task_id = ?
+      ORDER BY created_at DESC, rowid DESC
+      LIMIT 1
+    `).get(taskId));
+  }
+
   getRun(id) {
     return runFromRow(this.#runRow(id));
   }
