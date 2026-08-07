@@ -7,6 +7,7 @@ import {
 import { ApiError } from "./database.mjs";
 
 const ACTIVE_RUN_STATUSES = ["queued", "running", "paused"];
+const TERMINAL_RUN_STATUSES = ["completed", "failed", "cancelled"];
 const RETRYABLE_NODE_STATUSES = ["failed", "interrupted", "rejected", "recovery_required"];
 const TERMINAL_SUBAGENT_STATUSES = ["completed", "failed", "interrupted", "cancelled"];
 
@@ -577,6 +578,59 @@ export class WorkflowStore {
     return runFromRow(this.#runRow(id));
   }
 
+  transitionRun(runId, expectedStatuses, nextStatus) {
+    if (!Array.isArray(expectedStatuses) || expectedStatuses.length === 0) {
+      throw new TypeError("expectedStatuses must contain at least one status");
+    }
+    return this.#transaction(() => {
+      const current = this.#runRow(runId);
+      if (!current) {
+        throw new ApiError(404, "WORKFLOW_RUN_NOT_FOUND", `Workflow run '${runId}' does not exist`);
+      }
+      if (!expectedStatuses.includes(current.status)) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_RUN_STATE_CONFLICT",
+          "Workflow run state changed before the transition",
+          { expectedStatuses, actualStatus: current.status, actualVersion: current.version },
+        );
+      }
+
+      const timestamp = now();
+      const assignments = ["status = ?", "version = version + 1", "updated_at = ?"];
+      const values = [nextStatus, timestamp];
+      if (nextStatus === "running") {
+        assignments.push("started_at = COALESCE(started_at, ?)", "finished_at = NULL");
+        values.push(timestamp);
+      } else if (TERMINAL_RUN_STATUSES.includes(nextStatus)) {
+        assignments.push("finished_at = COALESCE(finished_at, ?)");
+        values.push(timestamp);
+      } else {
+        assignments.push("finished_at = NULL");
+      }
+      values.push(runId, current.version);
+      const result = this.#statement(`
+        UPDATE workflow_runs SET ${assignments.join(", ")}
+        WHERE id = ? AND version = ?
+      `).run(...values);
+      if (result.changes !== 1) {
+        const actual = this.#runRow(runId);
+        throw new ApiError(
+          409,
+          "WORKFLOW_RUN_STATE_CONFLICT",
+          "Workflow run state changed before the transition",
+          {
+            expectedStatuses,
+            expectedVersion: current.version,
+            actualStatus: actual?.status ?? null,
+            actualVersion: actual?.version ?? null,
+          },
+        );
+      }
+      return runFromRow(this.#runRow(runId));
+    });
+  }
+
   getRunSnapshot(id) {
     const run = this.getRun(id);
     if (!run) return null;
@@ -750,7 +804,15 @@ export class WorkflowStore {
 
       const claimedAt = now();
       const expiresAt = new Date(Date.now() + leaseMs).toISOString();
-      this.#statement("DELETE FROM workflow_resource_leases WHERE expires_at <= ?").run(claimedAt);
+      this.#statement(`
+        DELETE FROM workflow_resource_leases
+        WHERE expires_at <= ?
+          AND NOT EXISTS (
+            SELECT 1 FROM workflow_node_runs
+            WHERE workflow_node_runs.id = workflow_resource_leases.node_run_id
+              AND workflow_node_runs.status = 'running'
+          )
+      `).run(claimedAt);
       const candidates = this.#statement(`
         SELECT * FROM workflow_node_runs
         WHERE run_id = ? AND status = 'ready'
@@ -762,13 +824,13 @@ export class WorkflowStore {
         if (claimed.length >= limit) break;
         const resources = parseJson(candidate.resources) ?? [];
         const compatible = resources.every((resource) => {
-          const live = this.#statement(`
+          const held = this.#statement(`
             SELECT mode FROM workflow_resource_leases
-            WHERE resource_key = ? AND expires_at > ? AND node_run_id <> ?
-          `).all(resource.key, claimedAt, candidate.id);
+            WHERE resource_key = ? AND node_run_id <> ?
+          `).all(resource.key, candidate.id);
           return resource.mode === "shared"
-            ? live.every((lease) => lease.mode === "shared")
-            : live.length === 0;
+            ? held.every((lease) => lease.mode === "shared")
+            : held.length === 0;
         });
         if (!compatible) continue;
 
@@ -793,6 +855,72 @@ export class WorkflowStore {
         claimed.push(nodeRunFromRow(this.#nodeRunRow(candidate.id)));
       }
       return claimed;
+    });
+  }
+
+  renewNodeLease({ nodeRunId, owner, leaseMs }) {
+    if (typeof owner !== "string" || owner.length === 0 || !Number.isFinite(leaseMs) || leaseMs <= 0) {
+      throw new ApiError(400, "INVALID_WORKFLOW_LEASE", "Workflow lease owner and duration are required");
+    }
+    return this.#transaction(() => {
+      const node = this.#nodeRunRow(nodeRunId);
+      if (!node) {
+        throw new ApiError(404, "WORKFLOW_NODE_NOT_FOUND", `Workflow node run '${nodeRunId}' does not exist`);
+      }
+      if (node.status !== "running" || node.lease_owner !== owner) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_LEASE_LOST",
+          "Workflow node lease is not owned by this scheduler",
+          {
+            nodeRunId,
+            owner,
+            actualOwner: node.lease_owner,
+            nodeStatus: node.status,
+          },
+        );
+      }
+
+      const resources = parseJson(node.resources) ?? [];
+      const leases = this.#statement(`
+        SELECT resource_key, mode, owner
+        FROM workflow_resource_leases WHERE node_run_id = ?
+      `).all(nodeRunId);
+      const leasesByKey = new Map(leases.map((lease) => [lease.resource_key, lease]));
+      const resourcesOwned = leases.length === resources.length
+        && resources.every((resource) => {
+          const lease = leasesByKey.get(resource.key);
+          return lease?.mode === resource.mode && lease.owner === owner;
+        });
+      if (!resourcesOwned) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_LEASE_LOST",
+          "Workflow resource leases no longer match the node lease",
+          { nodeRunId, owner },
+        );
+      }
+
+      const timestamp = now();
+      const expiresAt = new Date(Date.now() + leaseMs).toISOString();
+      this.#statement(`
+        UPDATE workflow_resource_leases SET expires_at = ?
+        WHERE node_run_id = ? AND owner = ?
+      `).run(expiresAt, nodeRunId, owner);
+      const result = this.#statement(`
+        UPDATE workflow_node_runs
+        SET lease_expires_at = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND status = 'running' AND lease_owner = ?
+      `).run(expiresAt, timestamp, nodeRunId, owner);
+      if (result.changes !== 1) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_LEASE_LOST",
+          "Workflow node lease changed before renewal",
+          { nodeRunId, owner },
+        );
+      }
+      return nodeRunFromRow(this.#nodeRunRow(nodeRunId));
     });
   }
 
@@ -838,16 +966,63 @@ export class WorkflowStore {
   }
 
   bindAttemptThread({ attemptId, threadId, turnId }) {
-    this.#ensureOpen();
-    const result = this.#statement(`
-      UPDATE workflow_node_attempts
-      SET thread_id = ?, turn_id = ?, status = 'running', finished_at = NULL
-      WHERE id = ?
-    `).run(threadId, turnId, attemptId);
-    if (result.changes !== 1) {
-      throw new ApiError(404, "WORKFLOW_ATTEMPT_NOT_FOUND", `Workflow attempt '${attemptId}' does not exist`);
-    }
-    return attemptFromRow(this.#attemptRow(attemptId));
+    return this.#transaction(() => {
+      const attempt = this.#statement(`
+        SELECT
+          workflow_node_attempts.*,
+          workflow_node_runs.status AS node_status,
+          workflow_node_runs.active_attempt_id
+        FROM workflow_node_attempts
+        JOIN workflow_node_runs ON workflow_node_runs.id = workflow_node_attempts.node_run_id
+        WHERE workflow_node_attempts.id = ?
+      `).get(attemptId);
+      if (!attempt) {
+        throw new ApiError(404, "WORKFLOW_ATTEMPT_NOT_FOUND", `Workflow attempt '${attemptId}' does not exist`);
+      }
+      if (
+        attempt.status !== "running"
+        || attempt.node_status !== "running"
+        || attempt.active_attempt_id !== attemptId
+      ) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_ATTEMPT_STATE_CONFLICT",
+          "Only the current active running attempt can bind a thread",
+          {
+            attemptId,
+            attemptStatus: attempt.status,
+            nodeStatus: attempt.node_status,
+            activeAttemptId: attempt.active_attempt_id,
+          },
+        );
+      }
+      if (attempt.thread_id !== null && threadId !== null && attempt.thread_id !== threadId) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_ATTEMPT_BINDING_CONFLICT",
+          "Workflow attempt is already bound to another thread",
+          { attemptId, expectedThreadId: attempt.thread_id, actualThreadId: threadId },
+        );
+      }
+      if (attempt.turn_id !== null && turnId !== null && attempt.turn_id !== turnId) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_ATTEMPT_BINDING_CONFLICT",
+          "Workflow attempt is already bound to another turn",
+          { attemptId, expectedTurnId: attempt.turn_id, actualTurnId: turnId },
+        );
+      }
+      const nextThreadId = threadId ?? attempt.thread_id;
+      const nextTurnId = turnId ?? attempt.turn_id;
+      if (nextThreadId === attempt.thread_id && nextTurnId === attempt.turn_id) {
+        return attemptFromRow(attempt);
+      }
+      this.#statement(`
+        UPDATE workflow_node_attempts SET thread_id = ?, turn_id = ?
+        WHERE id = ? AND status = 'running'
+      `).run(nextThreadId, nextTurnId, attemptId);
+      return attemptFromRow(this.#attemptRow(attemptId));
+    });
   }
 
   appendEvent({ runId, nodeRunId = null, attemptId = null, type, data }) {
@@ -1043,8 +1218,6 @@ export class WorkflowStore {
       result: ["result", (value) => value === null ? null : json(value)],
       branchOutcome: ["branch_outcome", (value) => value],
       activeAttemptId: ["active_attempt_id", (value) => value],
-      leaseOwner: ["lease_owner", (value) => value],
-      leaseExpiresAt: ["lease_expires_at", (value) => value],
     };
     const assignments = ["status = ?"];
     const values = [nextStatus];
@@ -1102,19 +1275,49 @@ export class WorkflowStore {
     });
   }
 
-  releaseNodeResources(nodeRunId) {
+  releaseNodeResources(nodeRunId, owner = null) {
     return this.#transaction(() => {
-      if (!this.#nodeRunRow(nodeRunId)) {
+      const node = this.#nodeRunRow(nodeRunId);
+      if (!node) {
         throw new ApiError(404, "WORKFLOW_NODE_NOT_FOUND", `Workflow node run '${nodeRunId}' does not exist`);
       }
+      const leases = this.#statement(`
+        SELECT owner FROM workflow_resource_leases WHERE node_run_id = ?
+      `).all(nodeRunId);
+      if (node.lease_owner === null && leases.length === 0) {
+        return nodeRunFromRow(node);
+      }
+      if (
+        typeof owner !== "string"
+        || owner.length === 0
+        || node.lease_owner !== owner
+        || leases.some((lease) => lease.owner !== owner)
+      ) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_LEASE_LOST",
+          "Workflow node resources can only be released by their current owner",
+          { nodeRunId, owner, actualOwner: node.lease_owner },
+        );
+      }
       const timestamp = now();
-      this.#statement("DELETE FROM workflow_resource_leases WHERE node_run_id = ?").run(nodeRunId);
       this.#statement(`
+        DELETE FROM workflow_resource_leases WHERE node_run_id = ? AND owner = ?
+      `).run(nodeRunId, owner);
+      const result = this.#statement(`
         UPDATE workflow_node_runs
         SET lease_owner = NULL, lease_expires_at = NULL,
             version = version + 1, updated_at = ?
-        WHERE id = ?
-      `).run(timestamp, nodeRunId);
+        WHERE id = ? AND lease_owner = ?
+      `).run(timestamp, nodeRunId, owner);
+      if (result.changes !== 1) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_LEASE_LOST",
+          "Workflow node lease changed before release",
+          { nodeRunId, owner },
+        );
+      }
       return nodeRunFromRow(this.#nodeRunRow(nodeRunId));
     });
   }
