@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { CodexAppServerClient } from "./codex-app-server.mjs";
 
 const HISTORY_TIMEOUT_MS = 30_000;
 const HISTORY_MAX_LINE_BYTES = 16 * 1024 * 1024;
@@ -103,105 +103,14 @@ function codexChatEvents(threadId, thread) {
   return events;
 }
 
-function withCodexAppServer({
-  codexExecutable,
-  cwd,
-  processEnv,
-  timeoutMs,
-  timeoutMessage,
-  exitAction,
-  requestErrorMessage,
-  maxLineBytes = HISTORY_MAX_LINE_BYTES,
-}, operation) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(codexExecutable, ["app-server", "--stdio"], {
-      cwd,
-      env: processEnv,
-      stdio: ["pipe", "pipe", "ignore"],
-    });
-    const pending = new Map();
-    let nextId = 1;
-    let buffer = "";
-    let settled = false;
-    const timeout = setTimeout(() => finish(new Error(timeoutMessage)), timeoutMs);
-
-    function finish(error, value) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      child.stdin.end();
-      child.kill("SIGTERM");
-      if (error) reject(error);
-      else resolve(value);
-    }
-
-    function send(message) {
-      child.stdin.write(`${JSON.stringify(message)}\n`);
-    }
-
-    function request(method, params) {
-      const id = nextId;
-      nextId += 1;
-      return new Promise((resolveRequest, rejectRequest) => {
-        pending.set(id, { resolve: resolveRequest, reject: rejectRequest });
-        send({ id, method, ...(params === undefined ? {} : { params }) });
-      });
-    }
-
-    function handleMessage(message) {
-      const response = pending.get(message?.id);
-      if (!response) return;
-      pending.delete(message.id);
-      if (message.error) {
-        response.reject(new Error(
-          typeof message.error.message === "string"
-            ? message.error.message
-            : requestErrorMessage,
-        ));
-      } else {
-        response.resolve(message.result);
-      }
-    }
-
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      buffer += chunk;
-      if (Buffer.byteLength(buffer) > maxLineBytes) {
-        finish(new Error("Codex history response exceeded the line size limit"));
-        return;
-      }
-      let newlineIndex = buffer.indexOf("\n");
-      while (newlineIndex >= 0 && !settled) {
-        const line = buffer.slice(0, newlineIndex).trim();
-        buffer = buffer.slice(newlineIndex + 1);
-        if (line) {
-          try {
-            handleMessage(JSON.parse(line));
-          } catch {}
-        }
-        newlineIndex = buffer.indexOf("\n");
-      }
-    });
-    child.stdin.on("error", (error) => finish(error));
-    child.once("error", (error) => finish(error));
-    child.once("exit", (code, signal) => {
-      if (!settled) {
-        finish(new Error(`Codex app-server exited before ${exitAction} (${signal || code})`));
-      }
-    });
-    child.once("spawn", async () => {
-      try {
-        await request("initialize", {
-          clientInfo: { name: "codex-taskboard", version: "0.1.0" },
-          capabilities: { experimentalApi: true },
-        });
-        send({ method: "initialized" });
-        finish(null, await operation(request));
-      } catch (error) {
-        finish(error);
-      }
-    });
-  });
+async function withCodexAppServer(options, operation) {
+  const client = new CodexAppServerClient(options);
+  await client.start();
+  try {
+    return await operation((method, params) => client.request(method, params));
+  } finally {
+    await client.close();
+  }
 }
 
 async function listCodexThreadEntries(request) {
