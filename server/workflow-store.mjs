@@ -555,7 +555,7 @@ export class WorkflowStore {
     return this.#statement(`
       SELECT * FROM workflow_revisions
       WHERE task_id = ?
-      ORDER BY revision DESC, created_at DESC, id DESC
+      ORDER BY created_at DESC, id DESC
     `).all(taskId).map(revisionFromRow);
   }
 
@@ -1372,6 +1372,14 @@ export class WorkflowStore {
       const normalizedCandidateResult = candidateResultPresent ? json(candidateResult) : null;
       const errorPresent = error !== undefined;
       const normalizedError = errorPresent ? json(error) : null;
+      if (attempt.turn_id !== null && attempt.turn_id !== expectedTurnId) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_ATTEMPT_TURN_CONFLICT",
+          "Workflow turn changed before completion",
+          { attemptId, expectedTurnId, actualTurnId: attempt.turn_id },
+        );
+      }
       if (attempt.last_finished_turn_id === expectedTurnId) {
         if (
           attempt.last_finished_status === status
