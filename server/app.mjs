@@ -39,6 +39,8 @@ import {
 import { CodexAppServerClient } from "./codex-app-server.mjs";
 import { ApiError, TaskboardDatabase } from "./database.mjs";
 import { createWorkflowBusinessStore } from "./workflow-business-store.mjs";
+import { WorkflowOrchestrator } from "./workflow-orchestrator.mjs";
+import { WorkflowPlanningProjection } from "./workflow-planning-projection.mjs";
 import { WorkflowReviewService } from "./workflow-review.mjs";
 import { WorkflowStore } from "./workflow-store.mjs";
 import {
@@ -489,6 +491,16 @@ function parseWorkflowRevisionCreate(body) {
   return {
     templateId: stringField(body.templateId, "templateId", { required: true, maxLength: 256 }),
   };
+}
+
+function parseWorkflowNodeControl(body) {
+  assertPlainObject(body);
+  assertAllowedKeys(body, new Set(["action"]));
+  const action = stringField(body.action, "action", { required: true, maxLength: 32 });
+  if (!new Set(["approve", "reject", "cancel"]).has(action)) {
+    throw new ApiError(400, "INVALID_FIELD", "'action' must be approve, reject, or cancel");
+  }
+  return action;
 }
 
 function parseSortOrder(value) {
@@ -1621,6 +1633,24 @@ export function createTaskboardServer(options = {}) {
       ? { turnTimeoutMs: options.workflowReviewTurnTimeoutMs }
       : {}),
   });
+  const workflowPlanningProjection = options.workflowPlanningProjection
+    ?? new WorkflowPlanningProjection(resolved.dataDirectory);
+  const workflowOrchestrator = options.workflowOrchestrator ?? new WorkflowOrchestrator({
+    store: workflowStore,
+    businessStore: workflowBusinessStore,
+    codex: workflowCodex,
+    planningProjection: workflowPlanningProjection,
+    resolveWorkspace: (projectId) => resolveAiWorkspace(
+      projectId,
+      resolved.codexStatePath,
+      database,
+      resolveProjectDevice,
+    ),
+    getCatalog: (projectId) => aiChat.getCatalog(projectId),
+    events,
+    ...(options.workflowLeaseMs ? { leaseMs: options.workflowLeaseMs } : {}),
+    ...(options.workflowHeartbeatMs ? { heartbeatMs: options.workflowHeartbeatMs } : {}),
+  });
   const aiEventResponses = new Set();
 
   const server = createServer(async (request, response) => {
@@ -2083,7 +2113,39 @@ export function createTaskboardServer(options = {}) {
         assertNoQuery(url.searchParams, "Task workflow snapshot");
         if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
         const taskId = decodeRouteSegment(taskWorkflowRoute[1], "Task id");
-        return sendJson(response, 200, await workflowReviewService.getTaskWorkflow(taskId));
+        return sendJson(response, 200, await workflowOrchestrator.getTaskWorkflow(taskId));
+      }
+
+      const workflowEnqueueRoute = pathname.match(
+        /^\/api\/local\/workflow\/revisions\/([^/]+)\/enqueue$/,
+      );
+      if (workflowEnqueueRoute) {
+        assertNoQuery(url.searchParams, "Workflow revision enqueue");
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        await assertEmptyRequestBody(request, "POST /api/local/workflow/revisions/:id/enqueue");
+        const revisionId = decodeRouteSegment(workflowEnqueueRoute[1], "Workflow revision id");
+        const snapshot = await workflowOrchestrator.enqueueRevision(revisionId);
+        return sendJson(response, 201, { snapshot });
+      }
+
+      const workflowRunRoute = pathname.match(/^\/api\/local\/workflow\/runs\/([^/]+)$/);
+      if (workflowRunRoute) {
+        assertNoQuery(url.searchParams, "Workflow run snapshot");
+        if (request.method !== "GET") return methodNotAllowed(response, ["GET"]);
+        const runId = decodeRouteSegment(workflowRunRoute[1], "Workflow run id");
+        return sendJson(response, 200, { snapshot: workflowOrchestrator.getRunSnapshot(runId) });
+      }
+
+      const workflowNodeControlRoute = pathname.match(
+        /^\/api\/local\/workflow\/nodes\/([^/]+)\/control$/,
+      );
+      if (workflowNodeControlRoute) {
+        assertNoQuery(url.searchParams, "Workflow node control");
+        if (request.method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const nodeRunId = decodeRouteSegment(workflowNodeControlRoute[1], "Workflow node run id");
+        const action = parseWorkflowNodeControl(await readJson(request));
+        const snapshot = await workflowOrchestrator.controlNode(nodeRunId, action);
+        return sendJson(response, 200, { snapshot });
       }
 
       let currentCloudConfig = null;
@@ -2602,6 +2664,8 @@ export function createTaskboardServer(options = {}) {
     workflowBusinessStore,
     workflowCodex,
     workflowReviewService,
+    workflowPlanningProjection,
+    workflowOrchestrator,
     aiChat,
     dispatcher,
     server,
@@ -2627,7 +2691,9 @@ export function createTaskboardServer(options = {}) {
       const address = server.address();
       try {
         await dispatcher.start({ companionUrl: `http://127.0.0.1:${address.port}` });
+        await workflowOrchestrator.start();
       } catch (error) {
+        await dispatcher.close();
         await new Promise((resolve) => server.close(resolve));
         listening = false;
         throw error;
@@ -2642,7 +2708,10 @@ export function createTaskboardServer(options = {}) {
         : Promise.resolve();
       unsubscribeDispatcherEvents();
       await dispatcher.close();
-      await workflowReviewService.close();
+      await Promise.all([
+        workflowReviewService.close(),
+        workflowOrchestrator.close(),
+      ]);
       events.close();
       for (const response of aiEventResponses) response.end();
       aiEventResponses.clear();
