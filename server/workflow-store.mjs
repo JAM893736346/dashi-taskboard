@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   assertWorkflowRuntimeGraph,
@@ -8,6 +9,7 @@ import { ApiError } from "./database.mjs";
 
 const ACTIVE_RUN_STATUSES = ["queued", "running", "paused"];
 const TERMINAL_RUN_STATUSES = ["completed", "failed", "cancelled"];
+const NONTERMINAL_NODE_STATUSES = ["blocked", "ready", "running", "awaiting_confirmation"];
 const RETRYABLE_NODE_STATUSES = ["failed", "interrupted", "rejected", "recovery_required"];
 const TERMINAL_SUBAGENT_STATUSES = ["completed", "failed", "interrupted", "cancelled"];
 
@@ -21,6 +23,10 @@ function parseJson(value) {
 
 function json(value) {
   return JSON.stringify(value ?? null);
+}
+
+function sameJsonValue(left, right) {
+  return isDeepStrictEqual(parseJson(left), parseJson(right));
 }
 
 function templateRevisionFromRow(row) {
@@ -115,6 +121,12 @@ function attemptFromRow(row) {
     status: row.status,
     threadId: row.thread_id,
     turnId: row.turn_id,
+    lastFinishedTurnId: row.last_finished_turn_id,
+    lastFinishedStatus: row.last_finished_status,
+    lastFinishedCandidateResultPresent: Boolean(row.last_finished_candidate_result_present),
+    lastFinishedCandidateResult: parseJson(row.last_finished_candidate_result),
+    lastFinishedErrorPresent: Boolean(row.last_finished_error_present),
+    lastFinishedError: parseJson(row.last_finished_error),
     candidateResult: parseJson(row.candidate_result),
     error: parseJson(row.error),
     startedAt: row.started_at,
@@ -295,6 +307,12 @@ export class WorkflowStore {
         status TEXT NOT NULL CHECK (status IN ('running','completed','failed','interrupted','recovery_required','cancelled')),
         thread_id TEXT,
         turn_id TEXT,
+        last_finished_turn_id TEXT,
+        last_finished_status TEXT,
+        last_finished_candidate_result_present INTEGER NOT NULL DEFAULT 0 CHECK (last_finished_candidate_result_present IN (0,1)),
+        last_finished_candidate_result TEXT,
+        last_finished_error_present INTEGER NOT NULL DEFAULT 0 CHECK (last_finished_error_present IN (0,1)),
+        last_finished_error TEXT,
         candidate_result TEXT,
         error TEXT,
         started_at TEXT NOT NULL,
@@ -394,6 +412,23 @@ export class WorkflowStore {
       CREATE INDEX IF NOT EXISTS workflow_subagents_parent_node
         ON workflow_subagents(node_run_id, created_at, id);
     `);
+
+    const attemptColumns = new Set(
+      this.database.prepare("PRAGMA table_info(workflow_node_attempts)").all().map((row) => row.name),
+    );
+    const addedAttemptColumns = [
+      ["last_finished_turn_id", "TEXT"],
+      ["last_finished_status", "TEXT"],
+      ["last_finished_candidate_result_present", "INTEGER NOT NULL DEFAULT 0 CHECK (last_finished_candidate_result_present IN (0,1))"],
+      ["last_finished_candidate_result", "TEXT"],
+      ["last_finished_error_present", "INTEGER NOT NULL DEFAULT 0 CHECK (last_finished_error_present IN (0,1))"],
+      ["last_finished_error", "TEXT"],
+    ];
+    for (const [column, definition] of addedAttemptColumns) {
+      if (!attemptColumns.has(column)) {
+        this.database.exec(`ALTER TABLE workflow_node_attempts ADD COLUMN ${column} ${definition}`);
+      }
+    }
   }
 
   #ensureOpen() {
@@ -594,6 +629,48 @@ export class WorkflowStore {
           "Workflow run state changed before the transition",
           { expectedStatuses, actualStatus: current.status, actualVersion: current.version },
         );
+      }
+
+      if (TERMINAL_RUN_STATUSES.includes(nextStatus)) {
+        const nodePlaceholders = NONTERMINAL_NODE_STATUSES.map(() => "?").join(", ");
+        const subagentPlaceholders = TERMINAL_SUBAGENT_STATUSES.map(() => "?").join(", ");
+        const unsettled = this.#statement(`
+          SELECT
+            (SELECT COUNT(*) FROM workflow_node_runs
+              WHERE run_id = ? AND status IN (${nodePlaceholders})) AS nonterminal_node_count,
+            (SELECT COUNT(*) FROM workflow_node_attempts
+              JOIN workflow_node_runs ON workflow_node_runs.id = workflow_node_attempts.node_run_id
+              WHERE workflow_node_runs.run_id = ? AND workflow_node_attempts.status = 'running') AS running_attempt_count,
+            (SELECT COUNT(*) FROM workflow_subagents
+              JOIN workflow_node_runs ON workflow_node_runs.id = workflow_subagents.node_run_id
+              WHERE workflow_node_runs.run_id = ?
+                AND workflow_subagents.status NOT IN (${subagentPlaceholders})) AS nonterminal_subagent_count,
+            (SELECT COUNT(*) FROM workflow_resource_leases
+              JOIN workflow_node_runs ON workflow_node_runs.id = workflow_resource_leases.node_run_id
+              WHERE workflow_node_runs.run_id = ?) AS resource_lease_count
+        `).get(
+          runId,
+          ...NONTERMINAL_NODE_STATUSES,
+          runId,
+          runId,
+          ...TERMINAL_SUBAGENT_STATUSES,
+          runId,
+        );
+        if (Object.values(unsettled).some((count) => count > 0)) {
+          throw new ApiError(
+            409,
+            "WORKFLOW_RUN_STATE_CONFLICT",
+            "Workflow run cannot become terminal until its aggregate is settled",
+            {
+              runId,
+              nextStatus,
+              nonterminalNodeCount: unsettled.nonterminal_node_count,
+              runningAttemptCount: unsettled.running_attempt_count,
+              nonterminalSubagentCount: unsettled.nonterminal_subagent_count,
+              resourceLeaseCount: unsettled.resource_lease_count,
+            },
+          );
+        }
       }
 
       const timestamp = now();
@@ -1222,6 +1299,32 @@ export class WorkflowStore {
             "Workflow Subagent identity fields are required",
           );
         }
+        const attempt = this.#attemptRow(input.attemptId);
+        if (!attempt) {
+          throw new ApiError(
+            404,
+            "WORKFLOW_ATTEMPT_NOT_FOUND",
+            `Workflow attempt '${input.attemptId}' does not exist`,
+          );
+        }
+        if (
+          attempt.node_run_id !== input.nodeRunId
+          || attempt.thread_id === null
+          || attempt.thread_id !== input.parentThreadId
+        ) {
+          throw new ApiError(
+            409,
+            "WORKFLOW_SUBAGENT_IDENTITY_CONFLICT",
+            "Workflow Subagent identity does not match its parent attempt",
+            {
+              nodeRunId: input.nodeRunId,
+              attemptId: input.attemptId,
+              parentThreadId: input.parentThreadId,
+              attemptNodeRunId: attempt.node_run_id,
+              attemptThreadId: attempt.thread_id,
+            },
+          );
+        }
         this.#statement(`
           INSERT INTO workflow_subagents (
             id, node_run_id, attempt_id, thread_id, parent_thread_id,
@@ -1265,13 +1368,39 @@ export class WorkflowStore {
       if (!attempt) {
         throw new ApiError(404, "WORKFLOW_ATTEMPT_NOT_FOUND", `Workflow attempt '${attemptId}' does not exist`);
       }
+      const candidateResultPresent = candidateResult !== undefined;
+      const normalizedCandidateResult = candidateResultPresent ? json(candidateResult) : null;
+      const errorPresent = error !== undefined;
+      const normalizedError = errorPresent ? json(error) : null;
+      if (attempt.last_finished_turn_id === expectedTurnId) {
+        if (
+          attempt.last_finished_status === status
+          && Boolean(attempt.last_finished_candidate_result_present) === candidateResultPresent
+          && sameJsonValue(attempt.last_finished_candidate_result, normalizedCandidateResult)
+          && Boolean(attempt.last_finished_error_present) === errorPresent
+          && sameJsonValue(attempt.last_finished_error, normalizedError)
+        ) {
+          return attemptFromRow(attempt);
+        }
+        throw new ApiError(
+          409,
+          "WORKFLOW_ATTEMPT_TURN_CONFLICT",
+          "Workflow turn was already completed with another outcome",
+          { attemptId, expectedTurnId, lastFinishedTurnId: attempt.last_finished_turn_id },
+        );
+      }
       if (attempt.status !== "running") {
-        if (attempt.status === status) return attemptFromRow(attempt);
         throw new ApiError(
           409,
           "WORKFLOW_ATTEMPT_STATE_CONFLICT",
-          "Workflow attempt is already terminal with another status",
-          { attemptId, expectedStatus: status, actualStatus: attempt.status },
+          "Workflow attempt is already terminal or the completed turn is stale",
+          {
+            attemptId,
+            expectedTurnId,
+            lastFinishedTurnId: attempt.last_finished_turn_id,
+            expectedStatus: status,
+            actualStatus: attempt.status,
+          },
         );
       }
       if (attempt.node_status !== "running" || attempt.active_attempt_id !== attemptId) {
@@ -1295,15 +1424,34 @@ export class WorkflowStore {
         );
       }
 
-      const assignments = ["status = ?", "turn_id = NULL", "finished_at = ?"];
-      const values = [status, status === "running" ? null : now()];
-      if (candidateResult !== undefined) {
+      const assignments = [
+        "status = ?",
+        "turn_id = NULL",
+        "last_finished_turn_id = ?",
+        "last_finished_status = ?",
+        "last_finished_candidate_result_present = ?",
+        "last_finished_candidate_result = ?",
+        "last_finished_error_present = ?",
+        "last_finished_error = ?",
+        "finished_at = ?",
+      ];
+      const values = [
+        status,
+        expectedTurnId,
+        status,
+        candidateResultPresent ? 1 : 0,
+        normalizedCandidateResult,
+        errorPresent ? 1 : 0,
+        normalizedError,
+        status === "running" ? null : now(),
+      ];
+      if (candidateResultPresent) {
         assignments.push("candidate_result = ?");
-        values.push(candidateResult === null ? null : json(candidateResult));
+        values.push(normalizedCandidateResult);
       }
-      if (error !== undefined) {
+      if (errorPresent) {
         assignments.push("error = ?");
-        values.push(error === null ? null : json(error));
+        values.push(normalizedError);
       }
       values.push(attemptId, expectedTurnId);
       const result = this.#statement(`
@@ -1524,6 +1672,14 @@ export class WorkflowStore {
         );
       }
       const run = this.#runRow(runId);
+      if (!ACTIVE_RUN_STATUSES.includes(run.status)) {
+        throw new ApiError(
+          409,
+          "WORKFLOW_RUN_STATE_CONFLICT",
+          "Workflow amendments can only be applied to an active run",
+          { amendmentId, runId, runStatus: run.status },
+        );
+      }
       const graph = JSON.parse(run.graph_snapshot);
       const applied = this.#statement(`
         SELECT patch FROM workflow_run_amendments
